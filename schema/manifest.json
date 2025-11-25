@@ -1,20 +1,54 @@
 {
     "schemas": {
-        "battery_percentage": [],
-        "battery_voltage": [],
-        "link_quality": [],
-        "sonoff_minir2": [
-            "SONOFF:ZBMINIR2"
-        ],
-        "sonoff_snzb-01p": [
-            "eWeLink:SNZB-01P"
-        ],
-        "tuya_zp01_pir_sensor": [
-            "_TZ3000_uw3dadam:TS0202"
-        ],
-        "zbeacon_ds01_contact_sensor": [
-            "Zbeacon:DS01"
-        ]
+        "battery_percentage": {
+            "mappings": [],
+            "includes": []
+        },
+        "battery_voltage": {
+            "mappings": [],
+            "includes": []
+        },
+        "link_quality": {
+            "mappings": [],
+            "includes": []
+        },
+        "sonoff_minir2": {
+            "mappings": [
+                "SONOFF:ZBMINIR2"
+            ],
+            "includes": [
+                "link_quality"
+            ]
+        },
+        "sonoff_snzb-01p": {
+            "mappings": [
+                "eWeLink:SNZB-01P"
+            ],
+            "includes": [
+                "link_quality",
+                "battery_percentage"
+            ]
+        },
+        "tuya_zp01_pir_sensor": {
+            "mappings": [
+                "_TZ3000_uw3dadam:TS0202"
+            ],
+            "includes": [
+                "link_quality",
+                "battery_percentage",
+                "battery_voltage"
+            ]
+        },
+        "zbeacon_ds01_contact_sensor": {
+            "mappings": [
+                "Zbeacon:DS01"
+            ],
+            "includes": [
+                "link_quality",
+                "battery_percentage",
+                "battery_voltage"
+            ]
+        }
     },
     "next": null
 }
