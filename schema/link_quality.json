@@ -1,0 +1,13 @@
+{
+    "version": 1,
+    "schemas": {
+        "link_quality": {
+            "sensors": {
+                "LinkQuality": {
+                    "parse_value": "/device_info,attr_list -> device_info.lqi",
+                    "format_category": "Zigbee"
+                }
+            }
+        }
+    }
+}

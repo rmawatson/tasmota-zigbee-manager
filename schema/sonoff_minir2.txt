@@ -1,0 +1,1 @@
+standard sonoff minir2

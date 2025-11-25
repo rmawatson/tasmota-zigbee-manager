@@ -1,0 +1,26 @@
+{
+    "version": 1,
+    "mappings":{
+        "eWeLink:SNZB-01P":"sonoff_snzb-01p"
+    },
+    "schemas": {
+        "sonoff_snzb-01p": {
+            "include": [
+                "link_quality",
+                "battery_percentage"
+            ],
+            "config": {
+                "battery": 1,
+                "deepsleep": 1
+            },
+            "sensors": {
+                "Pressed": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
+                    "parse_value": "/device_info,attr_list -> int(attr_list['Power'])+1",
+                    "reset_value": "/device_info,attr_list -> 0",
+                    "format_category": "Button"
+                }
+            }
+        }
+    }
+}

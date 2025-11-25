@@ -1,0 +1,25 @@
+{
+    "version": 1,
+    "mappings": {
+        "_TZ3000_uw3dadam:TS0202": "tuya_zp01_pir_sensor"
+    },
+    "schemas": {
+        "tuya_zp01_pir_sensor": {
+            "include": [
+                "link_quality",
+                "battery_percentage",
+                "battery_voltage"
+            ],
+            "config": {
+                "battery": 1,
+                "deepsleep": 1
+            },
+            "switches": {
+                "Occupancy": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('Occupancy')",
+                    "parse_value": "/device_info,attr_list -> attr_list['Occupancy'] ? true : false"
+                }
+            }
+        }
+    }
+}

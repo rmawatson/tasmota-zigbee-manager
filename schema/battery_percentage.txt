@@ -1,0 +1,1 @@
+generic battery percentage that takes its value from the tasmota provided zb_device.battery value. Used as an include in multiple other sensors

@@ -1,0 +1,13 @@
+{
+    "version": 1,
+    "schemas": {
+        "battery_voltage": {
+            "states": {
+                "BatteryVoltage": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('BatteryVoltage')",
+                    "parse_value": "/device_info,attr_list -> attr_list['BatteryVoltage']"
+                }
+            }
+        }
+    }
+}

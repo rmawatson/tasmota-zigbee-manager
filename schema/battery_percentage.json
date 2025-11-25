@@ -1,0 +1,12 @@
+{
+    "version": 1,
+    "schemas": {
+        "battery_percentage": {
+            "states": {
+                "BatteryPercentage": {
+                    "parse_value": "/device_info,attr_list -> device_info.battery"
+                }
+            }
+        }
+    }
+}

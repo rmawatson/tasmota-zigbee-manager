@@ -1,0 +1,1 @@
+generic battery voltage sensor that extracts its value if a 'BatteryVoltage' field is present.

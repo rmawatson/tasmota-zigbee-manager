@@ -1,0 +1,1 @@
+link quality that is available in all/most messages - value is not normalized to any single scale and seems manufaturer specific
