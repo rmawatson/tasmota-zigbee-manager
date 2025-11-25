@@ -15,19 +15,20 @@ def update_manifest():
     all_mappings = {}
     all_manifest_files = []
     index = 0
-    manifest_filename = "maifest.json"
+    manifest_filename = "manifest.json"
     last_manifest_filename = manifest_filename
     last_manifest_schemas = {}
+
     while True:
         all_manifest_files.append(manifest_filename)
         with open(manifest_path / manifest_filename, 'r', encoding='utf-8') as f:
             manifest = json.load(f)
-        maifest_schemas = manifest.get("schemas", {})
-        print(maifest_schemas)
-        all_mappings.update(maifest_schemas)
+        manifest_schemas = manifest.get("schemas", {})
 
+        all_mappings.update(manifest_schemas)
         last_manifest_filename = manifest_filename
-        last_manifest_schemas = maifest_schemas
+        last_manifest_schemas = manifest_schemas
+
         if manifest.get("next") is None:
             break
 
@@ -44,6 +45,7 @@ def update_manifest():
     unverified_includes = defaultdict(list)
     for json_file in (filename for filename in manifest_path.iterdir() if \
                         filename.name not in all_manifest_files and \
+                        filename.name != "index.json" and \
                         filename.suffix == ".json"):
         file_mappings = []
 
@@ -76,7 +78,6 @@ def update_manifest():
 
     available_includes = list(all_mappings.keys()) + list(new_manifest_entries.keys())
 
-    print(unverified_includes)
     for include, refernced_by in unverified_includes.items():
         if include not in available_includes:
             raise ManifestError(f"Included schema '{include}' referenced by files {refernced_by} not found in manifest")
@@ -85,7 +86,7 @@ def update_manifest():
     remaining_entries = dict(new_manifest_entries)
     current_manifest_schemas = dict(last_manifest_schemas)
     current_manifest_filename = last_manifest_filename
-    
+    created_manifests = []
     while remaining_entries:
         space_available = MAX_MANIFEST_SCHEMAS - len(current_manifest_schemas)
         
@@ -104,7 +105,7 @@ def update_manifest():
         if remaining_entries:
             index += 1
             new_manifest_filename = f"manifest.{index}.json"
-
+            created_manifests.append(new_manifest_filename)
             with open(manifest_path / current_manifest_filename, 'r', encoding='utf-8') as f:
                 prev_manifest = json.load(f)
             prev_manifest["next"] = new_manifest_filename
@@ -113,6 +114,28 @@ def update_manifest():
 
             current_manifest_filename = new_manifest_filename
             current_manifest_schemas = {}
+
+    index_path = manifest_path / "index.json"
+    if index_path.exists():
+        try:
+            with open(index_path, 'r', encoding='utf-8') as f:
+                index_data = json.load(f)
+        except:
+            index_data = {"manifests": []}
+    else:
+        index_data = {"manifests": []}
+
+    existing_manifests = index_data.get("manifests", [])
+
+    for manifest_file in created_manifests:
+        if manifest_file not in existing_manifests:
+            existing_manifests.append(manifest_file)
+    
+    index_data["manifests"] = existing_manifests
+    
+    with open(index_path, 'w', encoding='utf-8') as f:
+        json.dump(index_data, f, indent=4)
+    
 
 if __name__ == "__main__":
     update_manifest()
