@@ -1273,14 +1273,16 @@ class ZbmService
     end
 
     def on_zigbee_status_changed(available)
-        for device_info : self.device_infos.iter()
-            if device_info.status != ZbmDeviceStatus.Added
-                self.log.debug(f"Skipping {device_info.name}, not added")
-                continue
-            end
-            zbm_mqtt_bridge.dispatch_online_state(device_info,available)
-        end
-        self.log.debug(f"zigbee status changed to {available}")
+        self.on_mqtt_status_changed(available)
+        # for device_info : self.device_infos.iter()
+        #     if device_info.status != ZbmDeviceStatus.Added
+        #         self.log.debug(f"Skipping {device_info.name}, not added")
+        #         continue
+        #     end
+        #     zbm_mqtt_bridge.dispatch_online_state(device_info,available)
+        #     zbm_mqtt_bridge.request_device_values(device_info)
+        # end
+        # self.log.debug(f"zigbee status changed to {available}")
     end
 
     def on_mqtt_status_changed(available)
@@ -1527,8 +1529,8 @@ class ZbmService
         self.save_devices()
         if zbm_state.mqtt_connected
             zbm_mqtt_bridge.configure_device(device_info,compiled_schema)
-            zbm_mqtt_bridge.dispatch_online_state(device_info,zbm_state.zigbee_started)
             zbm_mqtt_bridge.request_device_values(device_info,compiled_schema)
+            tasmota.set_timer(4,/ -> zbm_mqtt_bridge.dispatch_online_state(device_info,zbm_state.zigbee_started))
         else
             self.log.info(f"device not configured mqtt offline name:{device_info.name} shortaddr:{device_info.shortaddr}")
         end
