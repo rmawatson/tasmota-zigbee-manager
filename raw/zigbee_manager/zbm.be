@@ -1410,7 +1410,14 @@ class ZbmService
     end
 
     def device_schema(device_info,schema_name)
-        var compiled_schema = zbm_schema_registry.schema(schema_name)
+        var compiled_schema
+        try
+            compiled_schema = zbm_schema_registry.schema(schema_name)
+        except "schema_error"
+            self.log.debug(f"invalid schema - schema '{schema_name}' does not exist")
+            device_info.status |= ZbmDeviceStatus.SchemaNotFound
+            return nil
+        end
 
         if !compiled_schema.valid
             self.log.debug(f"invalid schema - schema '{schema_name}' failed to compile")
