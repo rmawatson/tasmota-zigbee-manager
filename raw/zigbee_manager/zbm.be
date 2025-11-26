@@ -926,8 +926,12 @@ class ZbmMqttBridge
                 cached_payload["Time"] = zb_timestr()
 
                 if components.contains("format_category")
-                    var prefix = components["format_category"]
-                    cached_payload[prefix] = {entity_name:value}
+                    var format_category = components["format_category"]
+                    if !cached_payload.contains(format_category)
+                        cached_payload[format_category] = {entity_name:value}
+                    else
+                        cached_payload[format_category][entity_name] = value
+                    end
                 else
                     cached_payload[entity_name] = value
                 end
@@ -1081,7 +1085,12 @@ class ZbmMqttBridge
                 var sensor_detail = compiled_schema.schema["sensors"][sensor_name]
 
                 if sensor_detail.contains("format_category")
-                    sensors_payload[sensor_detail["format_category"]] = {sensor_name:nil}
+                    var format_category = sensor_detail["format_category"]
+                    if !sensors_payload.contains(format_category)
+                        sensors_payload[format_category] = {sensor_name:nil}
+                    else
+                        sensors_payload[format_category][sensor_name] = nil
+                    end
                 else
                     sensors_payload[sensor_name] = nil
                 end
