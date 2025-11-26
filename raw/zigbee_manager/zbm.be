@@ -840,20 +840,6 @@ class ZbmSchemaRegistry : ZbmNotify
     
 end
 
-class ZbmMqttDispatchData
-    var entity
-    var entity_name
-    var entity_index
-    var value
-
-    def init(entity,entity_name,entity_index,value)
-        self.entity = entity
-        self.entity_name = entity_name
-        self.entity_index = entity_index
-        self.value = value
-    end
-end
-
 class ZbmMqttBridge
 
     var topic_subscriptions
