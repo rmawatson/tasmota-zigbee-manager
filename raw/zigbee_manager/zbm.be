@@ -1227,13 +1227,13 @@ class ZbmService
 
         self.on_mqtt_status_changed(zbm_state.mqtt_connected)        
         self.on_auto_poll_devices_changed(zbm_state.auto_poll_devices)
-        self.log.info("ZbmService initialized")
+        self.log.info("initialized")
     end
 
     def unload()
         zigbee.remove_handler(self)
         tasmota.remove_driver(self)
-        self.log.info("ZbmService uninitialized")
+        self.log.info("uninitialized")
     end
 
     def save_devices()
@@ -1246,7 +1246,7 @@ class ZbmService
             end
             
         end
-        self.log.debug(f"saves devices")
+        self.log.debug(f"saved devices.")
         persist.zbm_device_infos = saved_devices
         persist.save(true)
     end
@@ -1474,13 +1474,13 @@ class ZbmService
 
     def update_device_status(device_info)
         if device_info.status & ZbmDeviceStatus.Unnamed
-            if ["",nil].find(device_info.name) != nil
+            if ["",nil].find(device_info.name) == nil
                 device_info.status &= ~ZbmDeviceStatus.Unnamed
             end
         end
         if device_info.status & ZbmDeviceStatus.NoDefaultKey
-            if ["",nil].find(strip(device_info.manufacturer)) != nil &&
-                ["",nil].find(strip(device_info.model)) != nil
+            if ["",nil].find(strip(device_info.manufacturer)) == nil &&
+                ["",nil].find(strip(device_info.model)) == nil
                 device_info.status &= ~ZbmDeviceStatus.NoDefaultKey
             end
         end
