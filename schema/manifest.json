@@ -48,6 +48,15 @@
                 "battery_percentage",
                 "battery_voltage"
             ]
+        },
+        "sonoff_snzb-02p": {
+            "mappings": [
+                "eWeLink:SNZB-02P"
+            ],
+            "includes": [
+                "link_quality",
+                "battery_percentage"
+            ]
         }
     },
     "next": null
