@@ -1,0 +1,8 @@
+{
+  "name": "Zigbee Manager",
+  "version": "0x01000000",
+  "description": "Zigbee Manager for Tasmota",
+  "author": "rmawatson@hotmail.com",
+  "min_tasmota": "0x09040000",
+  "features": ""
+}
