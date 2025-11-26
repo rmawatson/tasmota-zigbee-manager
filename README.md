@@ -139,7 +139,7 @@ Note: it may require some experimentation in the console using tasmotas `ZbSend`
         }
     }
     ```
-- Finally add a mapping to this schema. Assumning you want to use `auto_key_devices`. Using the information from `ZbmDevices` earlier
+- Finally add a mapping to this schema. Assuming you want to use `auto_key_devices` to generate `manufacturer:model` keys for your device then using the information from `ZbmDevices` earlier
     ```
     01:42:23.462 ZBM: info > status :    manufacturer: SONOFF
     01:42:23.464 ZBM: info > status :          model: ZBMINIR2
@@ -259,3 +259,7 @@ All commands are either read only (ro), read write (rw) or, write only (wo). Une
 > For all devices attached to the zigbee bridge, attempts to download valid schemas and mappings from the github repository for them based on the device key (or generated key if `auto_key_devices=true`). For devices that have schemas in the repository, assuming they are all named with `ZbName` already, with default settings this would be all that is required to make them discoverable (and in the case of home assistant they would show up as devices in the tasmota integration)
 
 
+## To do/Notes
+commands (see `sonoff_minir2.json`) are not currently implemented. Home assisant doesn't really have no code/yaml way to call them, but it would still be nice to listen to the topics to configure things such as TurboMode on the sonoff_minir2.
+
+the zha repository contains alot of already found information devices, for example the minir2, the TurboMode feature's details are described `https://github.com/zigpy/zha-device-handlers/blob/dev/zhaquirks/sonoff/zbminir2.py`
