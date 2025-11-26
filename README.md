@@ -5,6 +5,8 @@ This extension is meant to implement the Tasmota discovery protocol when running
 
 This is an alternative to Zigbee2MQTT and others such that it keeps all the zigbee communication on device, and translates this to mqtt messages that match any other Tasmotized wifi devices. 
 
+To install this extension in Tasmota, paste the url `https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/extensions/` into the field at the bottom of `Tools->Extensions` and install from there.
+
 Primarily this was implemented to allow automatic discovery on Home Assistant with the existing Tasmota Integration, and has been used with a few PIR sensors, contact sensors, temperature/humidity sensors and Sonoff relays. (see schemas/ folder)
 
 ## How it works
