@@ -1,0 +1,30 @@
+{
+    "version": 1,
+    "mappings":{
+        "eWeLink:SNZB-02P":"sonoff_snzb-02p"
+    },
+    "schemas": {
+        "sonoff_snzb-02p": {
+            "include": [
+                "link_quality",
+                "battery_percentage"
+            ],
+            "config": {
+                "battery": 1,
+                "deepsleep": 1
+            },
+            "sensors": {
+                "Temperature": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('Temperature')",
+                    "parse_value": "/device_info,attr_list -> real(attr_list['Temperature'])",
+                    "format_category": "Sensor"
+                },
+                "Humidity": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('Humidity')",
+                    "parse_value": "/device_info,attr_list -> real(attr_list['Humidity'])",
+                    "format_category": "Sensor"
+                }                
+            }
+        }
+    }
+}
