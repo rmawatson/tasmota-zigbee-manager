@@ -1967,6 +1967,42 @@ end
 
 
 
+def zbm_device(cmnd_name, idx, payload, payload_json)
+    var parsed_args 
+    if (parsed_args:= parse_args(cmnd_name,payload,payload_json,["deviceid"])) == nil
+        return tasmota.resp_cmnd_error()
+    end
+
+    var status = {"ZbmStatus":[]}
+    for device_info : zbm_service.device_infos.iter()
+        if device_info.deviceid == parsed_args[0].value
+            
+            var desc = ZbmDeviceStatus.descriptions(device_info.status)
+            var device_status = {"devicename":device_info.name,
+                                "deviceid":device_info.deviceid,
+                                "status":desc}
+
+            status["ZbmStatus"].push(device_status)
+            var devicename = (device_info.name != "" && device_info.name != nil) ? device_info.name : "<unnamed>"
+            ZbmLogger("status").info(f"[{devicename} (0x{device_info.shortaddr:.4X})]")
+            ZbmLogger("status").info(f"   manufacturer: {device_info.manufacturer}")
+            ZbmLogger("status").info(f"         model: {device_info.model}")
+            ZbmLogger("status").info(f"     shortaddr: 0x{device_info.shortaddr:.4X}")
+            ZbmLogger("status").info(f"      longaddr: 0x{device_info.longaddr}")
+            ZbmLogger("status").info(f"           mac: {device_info.macaddr}")
+            var format_time = tasmota.strftime('%Y-%m-%dT%H:%M:%S',device_info.lastseen)
+            ZbmLogger("status").info(f"      lastseen: {format_time}")
+            ZbmLogger("status").info(f"           lqi: {device_info.lqi}")
+            ZbmLogger("status").info(f"       battery: {device_info.battery}")
+            ZbmLogger("status").info(f"           key: {device_info.key}")
+            ZbmLogger("status").info(f"        status: {desc}")
+            return tasmota.resp_cmnd(status)
+            
+        end
+    end
+    return tasmota.resp_cmnd_error()
+end
+
 def zbm_devices(cmnd_name, idx, payload, payload_json)
 
     var status = {"ZbmStatus":[]}
@@ -1979,17 +2015,6 @@ def zbm_devices(cmnd_name, idx, payload, payload_json)
         status["ZbmStatus"].push(device_status)
         var devicename = (device_info.name != "" && device_info.name != nil) ? device_info.name : "<unnamed>"
         ZbmLogger("status").info(f"[{devicename} (0x{device_info.shortaddr:.4X})]")
-        ZbmLogger("status").info(f"   manufacturer: {device_info.manufacturer}")
-        ZbmLogger("status").info(f"         model: {device_info.model}")
-        ZbmLogger("status").info(f"     shortaddr: 0x{device_info.shortaddr:.4X}")
-        ZbmLogger("status").info(f"      longaddr: 0x{device_info.longaddr}")
-        ZbmLogger("status").info(f"           mac: {device_info.macaddr}")
-        var format_time = tasmota.strftime('%Y-%m-%dT%H:%M:%S',device_info.lastseen)
-        ZbmLogger("status").info(f"      lastseen: {format_time}")
-        ZbmLogger("status").info(f"           lqi: {device_info.lqi}")
-        ZbmLogger("status").info(f"       battery: {device_info.battery}")
-        ZbmLogger("status").info(f"           key: {device_info.key}")
-        ZbmLogger("status").info(f"        status: {desc}")
     end
     tasmota.resp_cmnd(status)
 end
@@ -2219,6 +2244,7 @@ class ZbmExtension
         zbm_schema_registry = ZbmSchemaRegistry()
         zbm_service = ZbmService()
 
+        tasmota.add_cmd('ZbmDevice',zbm_device)
         tasmota.add_cmd('ZbmDevices',zbm_devices)
         tasmota.add_cmd('ZbmSchemas',zbm_schemas)
         tasmota.add_cmd('ZbmConfig',zbm_config)
@@ -2248,7 +2274,7 @@ class ZbmExtension
         zbm_schema_registry = nil
         zbm_mqtt_bridge = nil
         zbm_state = nil
-
+        tasmota.remove_cmd('ZbmDevice')
         tasmota.remove_cmd('ZbmDevices')
         tasmota.remove_cmd('ZbmSchemas')
         tasmota.remove_cmd('ZbmConfig')
