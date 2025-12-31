@@ -20,7 +20,7 @@
                 },
                 "Tamper": {
                     "has_value": "/device_info,attr_list -> attr_list.contains('FC11/2000')",
-                    "parse_value": "/device_info,attr_list -> attr_list['FC11/2000'] ? true : false"
+                    "parse_value": "/device_info,attr_list -> attr_list['FC11/2000'] ?  false : true"
                 }
             }
         }
