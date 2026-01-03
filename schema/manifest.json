@@ -66,6 +66,14 @@
                 "link_quality",
                 "battery_percentage"
             ]
+        },
+        "ikea_tretakt": {
+            "mappings": [
+                "IKEA of Sweden:TRETAKT Smart plug"
+            ],
+            "includes": [
+                "link_quality"
+            ]
         }
     },
     "next": null

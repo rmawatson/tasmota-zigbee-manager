@@ -434,8 +434,8 @@ class ZbmSchemaProcessorInfo
     end
 
     static var value_in = /values -> /value -> (values.find(value) != nil)
-    static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9_-]+$", name)
-    static var valid_mapping = /name -> _class.valid_expr("^[:a-zA-Z0-9_-]+$", name)
+    static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9 _-]+$", name)
+    static var valid_mapping = /name -> _class.valid_expr("^[:a-zA-Z0-9 _-]+$", name)
 
     static def compile_fn(fn_string,schema_item)
         var info
@@ -1673,7 +1673,6 @@ def no_space(value)
 end
 
 def args_from_payload(payload,payload_json,arg_spec)
-
     var arguments = []
     var argument_names = []
     var num_optional = 0
@@ -1731,7 +1730,7 @@ def args_from_payload(payload,payload_json,arg_spec)
         process_argument(argument_map[key],value)
     end
 
-    if payload_json != nil
+    if payload_json != nil && type(payload_json) != "string"
         validate_arity(payload_json.size(),num_arguments-num_optional,num_arguments)
         for key : payload_json.keys()
             process_keyed_argument(key,payload_json[key])
@@ -2014,7 +2013,7 @@ def zbm_devices(cmnd_name, idx, payload, payload_json)
 
         status["ZbmStatus"].push(device_status)
         var devicename = (device_info.name != "" && device_info.name != nil) ? device_info.name : "<unnamed>"
-        ZbmLogger("status").info(f"[{devicename} (0x{device_info.shortaddr:.4X})]")
+        ZbmLogger("status").info(f"[{devicename} (0x{device_info.shortaddr:.4X})] {desc}")
     end
     tasmota.resp_cmnd(status)
 end
