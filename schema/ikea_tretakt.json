@@ -1,0 +1,21 @@
+{
+    "version": 1,
+    "mappings":{
+        "IKEA of Sweden:TRETAKT Smart plug":"ikea_tretakt"
+    },
+    "schemas": {
+        "ikea_tretakt": {
+            "include": [
+                "link_quality"
+            ],
+            "relays": {
+                "Power": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
+                    "parse_value": "/device_info,attr_list -> attr_list['Power'] ? 'ON' : 'OFF'",
+                    "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value ? 1 : 0})",
+                    "request_value": "/device_info,ctx -> ctx.zb_read(device_info,{'Power':1})"
+                }
+            }
+        }
+    }
+}
