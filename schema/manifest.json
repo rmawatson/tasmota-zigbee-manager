@@ -16,64 +16,44 @@
             "mappings": [
                 "SONOFF:ZBMINIR2"
             ],
-            "includes": [
-                "link_quality"
-            ]
+            "includes": []
         },
         "sonoff_snzb-01p": {
             "mappings": [
                 "eWeLink:SNZB-01P"
             ],
-            "includes": [
-                "link_quality",
-                "battery_percentage"
-            ]
+            "includes": []
         },
         "tuya_zp01_pir_sensor": {
             "mappings": [
                 "_TZ3000_uw3dadam:TS0202"
             ],
-            "includes": [
-                "link_quality",
-                "battery_percentage",
-                "battery_voltage"
-            ]
+            "includes": []
         },
         "zbeacon_ds01_contact_sensor": {
             "mappings": [
-                "Zbeacon:DS01"
+                "Zbeacon:DS01",
+                "_TZ3000_bpkijo14:TS0203"
             ],
-            "includes": [
-                "link_quality",
-                "battery_percentage",
-                "battery_voltage"
-            ]
+            "includes": []
         },
         "sonoff_snzb-02p": {
             "mappings": [
                 "eWeLink:SNZB-02P"
             ],
-            "includes": [
-                "link_quality",
-                "battery_percentage"
-            ]
+            "includes": []
         },
         "sonoff_snzb-04p": {
             "mappings": [
                 "eWeLink:SNZB-04P"
             ],
-            "includes": [
-                "link_quality",
-                "battery_percentage"
-            ]
+            "includes": []
         },
         "ikea_tretakt": {
             "mappings": [
                 "IKEA of Sweden:TRETAKT Smart plug"
             ],
-            "includes": [
-                "link_quality"
-            ]
+            "includes": []
         }
     },
     "next": null

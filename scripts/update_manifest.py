@@ -41,8 +41,8 @@ def update_manifest():
             manifest_filename = next_manifest_file
             index += 1
     
-    new_manifest_entries = {}
 
+    new_manifest_entries = {}
     unverified_includes = defaultdict(list)
     for json_file in (filename for filename in manifest_path.iterdir() if \
                         filename.name not in all_manifest_files and \
@@ -50,8 +50,8 @@ def update_manifest():
                         filename.suffix == ".json"):
         file_mappings = []
         file_includes = []
-        if json_file.stem in all_mappings.keys():
-            continue
+        # if json_file.stem in all_mappings.keys():
+        #     continue
         
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
@@ -65,15 +65,16 @@ def update_manifest():
         if "schemas" in json_data:
             for schema_name in json_data["schemas"].keys():
                 if schema_name in all_mappings:
-                    raise ManifestError(f"Schema '{json_data['schemas'][schema_name]}' in file '{json_file.name}' already exists in manifest")
-                
+                    continue  # schema already in manifest, skip it
+
                 if "include" in json_data["schemas"][schema_name]:
                     for include in json_data["schemas"][schema_name]["include"]:
                         unverified_includes[include].append(json_file.name)
                         file_includes.append(include)
-                    
+             
         if "mappings" in json_data:
             for mapping in json_data["mappings"]:
+                print("Mapping",mapping)
                 file_mappings.append(mapping)
         
         new_manifest_entries[json_file.stem] = {"mappings":file_mappings,"includes":file_includes}
