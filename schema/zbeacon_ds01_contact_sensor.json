@@ -1,7 +1,8 @@
 {
     "version": 1,
     "mappings": {
-        "Zbeacon:DS01": "zbeacon_ds01_contact_sensor"
+        "Zbeacon:DS01": "zbeacon_ds01_contact_sensor",
+        "_TZ3000_bpkijo14:TS0203": "zbeacon_ds01_contact_sensor"
     },
     "schemas": {
         "zbeacon_ds01_contact_sensor": {
