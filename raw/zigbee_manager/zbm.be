@@ -1939,7 +1939,7 @@ def zbm_add_mapping(cmnd_name, idx, payload, payload_json)
     var schema_name = parsed_args[1].value
 
     for part : [key,schema_name]
-        if part.startswith(" ")
+        if string.startswith(part," ")
             log_cmnd_info(cmnd_name,"value {part} has a leading space, possible error.")
         end
     end
