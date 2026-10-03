@@ -7,6 +7,9 @@ This is an alternative to Zigbee2MQTT and others such that it keeps all the zigb
 
 To install this extension in Tasmota, paste the url `https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/extensions/` into the field at the bottom of `Tools->Extensions` and install from there.
 
+> [!NOTE]
+> After installing, turn on retained messages for sensors and states with `SensorRetain 1` and `StateRetain 1` in the Tasmota console. Many zigbee devices only report when something changes, and the extension cannot be asked for a device's current values, so without retained messages Home Assistant shows no value for a device after it restarts, until the device next reports. These are Tasmota's own settings, so they also apply to the bridge's own `SENSOR` and `STATE` messages.
+
 Once installed, devices, schemas and settings can be managed from the **Zigbee Manager** page in the Tasmota web UI, see [Web UI](#web-ui), or with the [commands](#exposed-commands) in the console.
 
 Primarily this was implemented to allow automatic discovery on Home Assistant with the existing Tasmota Integration, and has been used with a few PIR sensors, contact sensors, temperature/humidity sensors and Sonoff relays (see the `schema/` folder).
@@ -304,6 +307,10 @@ A function is Berry code in a JSON string, in one of three forms
 - The JSON string is in double quotes, so use single quotes for strings in the Berry code, `attr_list['Power']`.
 - A `def` can hold several statements, on one line as above, or on several lines with `\n` between them in the JSON string.
 - The parameters can be named as you like, and the ones a function does not use can be left off the end, `/device_info -> device_info.lqi`.
+- Tasmota compiles Berry in strict mode, which refuses
+    - a variable named like a builtin, such as `str`, `list` or `number`: `strict: redefinition of builtin 'str'`
+    - a variable named like a parameter or another variable of the function: `redefinition of 'attr_list'`, or `strict: redefinition of 'attr_list' from outer scope` inside a block
+    - a statement that only works out a value without using it: `strict: expression without side effect detected`
 - `tasmota` and `log` can be used anywhere. Modules such as `math`, `string` and `json` are not global in Tasmota, so a lambda that uses one fails to compile with `'math' undeclared`. Import the module inside a `def` instead, `def (device_info, attr_list) import math return math.round(attr_list['Humidity']) end`.
 
 ### When something goes wrong
