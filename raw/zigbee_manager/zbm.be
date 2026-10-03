@@ -169,12 +169,21 @@ def zb_send(payload)
     tasmota.cmd(f"ZbSend {json.dump(payload)}")
 end
 
-def zb_write(device_info,payload)
-    zb_send({"Device":device_info.deviceid,"Send":payload})
+# without an endpoint, ZbSend sends to the device's first endpoint
+def zb_write(device_info,payload,endpoint)
+    var zb_payload = {"Device":device_info.deviceid,"Send":payload}
+    if endpoint != nil
+        zb_payload["Endpoint"] = endpoint
+    end
+    zb_send(zb_payload)
 end
 
-def zb_read(device_info,payload)
-    zb_send({"Device":device_info.deviceid,"Read":payload})
+def zb_read(device_info,payload,endpoint)
+    var zb_payload = {"Device":device_info.deviceid,"Read":payload}
+    if endpoint != nil
+        zb_payload["Endpoint"] = endpoint
+    end
+    zb_send(zb_payload)
 end
 
 
@@ -360,12 +369,14 @@ class ZbmCompiledSchema
     var schema    
     var includes
     var valid
+    var relay_numbers
 
-    def init(name,schema,includes,valid)
+    def init(name,schema,includes,valid,relay_numbers)
         self.name = name
         self.schema = schema
         self.includes = includes
         self.valid = (valid == nil || valid == true) ? true : false
+        self.relay_numbers = relay_numbers == nil ? {} : relay_numbers
     end
 end
 
@@ -435,6 +446,53 @@ class ZbmSchemaProcessorInfo
         return _class.fn_info(value) == false ? false: true
     end
 
+    # tasmota has at most 32 relays, MAX_RELAYS_SET
+    static var max_relays = 32
+
+    static def valid_index(value)
+        if type(value) != "int" || value < 1 || value > _class.max_relays
+            raise "validation_error", f"invalid relay index '{value}', expected a whole number from 1 to {_class.max_relays}"
+        end
+        return true
+    end
+
+    # the number n of each relay's cmnd/<device>/Power<n> and stat/<device>/POWER<n> topics.
+    # a relay with an "index" has that number, the others take the free numbers in order
+    # of their names, a berry map does not keep the order the relays are written in
+    static def relay_numbers(relays)
+        var numbers = {}
+        var taken = {}
+        var unnumbered = []
+        for relay_name : relays.keys()
+            var index = relays[relay_name].find("index")
+            if index == nil
+                var position = 0
+                while position < size(unnumbered) && unnumbered[position] < relay_name
+                    position += 1
+                end
+                unnumbered.insert(position,relay_name)
+            elif taken.contains(index)
+                raise "schema_error", f"relays '{taken[index]}' and '{relay_name}' have the same index {index}"
+            else
+                numbers[relay_name] = index
+                taken[index] = relay_name
+            end
+        end
+
+        var number = 1
+        for relay_name : unnumbered
+            while taken.contains(number)
+                number += 1
+            end
+            if number > _class.max_relays
+                raise "schema_error", f"no relay number is left for '{relay_name}', a device has at most {_class.max_relays} relays"
+            end
+            numbers[relay_name] = number
+            taken[number] = relay_name
+        end
+        return numbers
+    end
+
     static var value_in = /values -> /value -> (values.find(value) != nil)
     static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9 _-]+$", name)
     static var valid_mapping = /name -> _class.valid_expr("^[:a-zA-Z0-9 _-]+$", name)
@@ -463,6 +521,7 @@ class ZbmSchemaProcessorInfo
             ZbmSchemaItem("element_name", _class.valid_name("element_name"), _class.OPTIONAL): {
                 ZbmSchemaItem(f"one of {_join(_class.fn_components, ', ')}", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
                 ZbmSchemaItem("others", _class.value_in(["format_category"]), _class.OPTIONAL): ZbmSchemaItem("function_item",_class.valid_name( "name")),
+                ZbmSchemaItem("index", "index", _class.OPTIONAL): ZbmSchemaItem("relay_index",_class.valid_index),
             }
         },
         ZbmSchemaItem("config", "config", _class.OPTIONAL): {ZbmSchemaItem("config_item", _class.valid_name("config_key"), _class.OPTIONAL):nil},
@@ -736,13 +795,14 @@ class ZbmSchemaRegistry : ZbmNotify
                 schema_name,
                 compiled_schema,
                 schema_info.includes,
-                true)
+                true,
+                ZbmSchemaProcessorInfo.relay_numbers(compiled_schema.find("relays",{})))
+            self.log.debug(f"schema compiled succeeded '{schema_name}'")
         except .. as e,m
             self.log.debug(f"schema compile failed '{schema_name}' > {e} {m}")
             # set the valid flag to false, so constant recompiles of the schema are not tried
             self.compiled_cache[schema_name] = ZbmCompiledSchema(schema_name,nil,[],false)
         end
-        self.log.debug(f"schema compiled succeeded '{schema_name}'")
     end   
 
     def find_schemas(schema_name,resolve_includes)
@@ -956,15 +1016,15 @@ class ZbmMqttBridge
             
             var components = dispatch_data.components
             var entity_name = dispatch_data.entity_name
-            var entity_index = dispatch_data.entity_index
+            var relay_number = dispatch_data.relay_number
             var value = dispatch_data.value
 
             if category_name == "relays"
                 var state_topic = f"tele/{device_info.name}/STATE"
 
                 var publish_value = (type(value) == "int" || type(value) == "bool") ? (value ? "ON" : "OFF") : value
-                mqtt.publish(f"stat/{device_info.name}/POWER{entity_index+1}",publish_value)
-                mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{entity_index+1}":publish_value}))
+                mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",publish_value)
+                mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":publish_value}))
 
             elif category_name == "switches"
 
@@ -1020,7 +1080,7 @@ class ZbmMqttBridge
         end
     end
 
-    def relay_command_handler(device_info,entity_index,relay_components,relay_name,payload)
+    def relay_command_handler(device_info,relay_number,relay_components,relay_name,payload)
         self.log.debug(f"recieved command {payload} for {relay_name}")
 
         var payload_value = payload
@@ -1041,8 +1101,8 @@ class ZbmMqttBridge
         zb_invoke_handler("set_value",relay_components,device_info,payload_value)
 
         # self.log.debug("publishing early response")
-        # mqtt.publish(f"stat/{device_info.name}/POWER{entity_index+1}",string.toupper(payload))
-        # mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{entity_index+1}":string.toupper(payload)}))        
+        # mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",string.toupper(payload))
+        # mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":string.toupper(payload)}))
     end 
 
     def configure_device(device_info,compiled_schema)
@@ -1070,13 +1130,18 @@ class ZbmMqttBridge
         if compiled_schema.schema.contains("relays")
 
             var relay_state_keys = []
-            var index = 1 
             for relay_name :  compiled_schema.schema["relays"].keys()
-                var relay_components = compiled_schema.schema["relays"][relay_name] 
-                relays.push(1)
-                
+                var relay_components = compiled_schema.schema["relays"][relay_name]
+                # the same number is used for the state, see ZbmService.attributes_final
+                var relay_number = compiled_schema.relay_numbers[relay_name]
+                # rl has an entry for every number up to the highest, 0 where there is no relay
+                while size(relays) < relay_number
+                    relays.push(0)
+                end
+                relays[relay_number-1] = 1
+
                 if relay_components.contains("set_value")
-                    var topic = f"cmnd/{device_info.name}/Power{index}"
+                    var topic = f"cmnd/{device_info.name}/Power{relay_number}"
                     # a device is configured again when mqtt reconnects or its schema is
                     # pulled again. drop the listener added last time, otherwise every
                     # command would be sent to the device once per configuration
@@ -1086,14 +1151,13 @@ class ZbmMqttBridge
                         self.topic_subscriptions.push(topic)
                     end
                     mqtt.subscribe(topic,
-                        /topic,index,payload_s,payload_b -> 
-                            self.relay_command_handler(device_info,index,relay_components,relay_name,payload_s) 
+                        /topic,idx,payload_s,payload_b ->
+                            self.relay_command_handler(device_info,relay_number,relay_components,relay_name,payload_s)
                     )
                 else
                     self.log.error(f"relay '{relay_name}' missing expected set_value handler")
                     compiled_schema.valid =  false
                 end
-                index +=1
             end
             
         end
@@ -1674,12 +1738,13 @@ class ZbmService
             var reset_dispatch_data = []
 
             var entity_list = compiled_schema.schema[category_name]
-            var entity_index = 0
-
 
             for entity_name : entity_list.keys()
 
                 var components = entity_list[entity_name]
+                # a relay's state is published with the number of its command topic, not
+                # its position among the relays that have a value in this message
+                var relay_number = category_name == "relays" ? compiled_schema.relay_numbers[entity_name] : nil
                 var log_debug_error = /handler_name ->
                     self.log.debug(f"an error occurred executing {handler_name} handler for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}")
 
@@ -1702,16 +1767,14 @@ class ZbmService
                     continue
                 else
                     self.log.debug(f"new value for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}={value}")
-                    dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"entity_index":entity_index,"value":value}))                    
+                    dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":value}))                    
                 end
                 
                 var reset_value #temporary solution to have a push button masqurade as a sensor and 'toggle' its value
                 if [zb_handler_invalid,zb_handler_error].find(reset_value := zb_invoke_handler("reset_value",components,device_info,attr_list)) == nil
                     self.log.debug(f"new reset for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}={reset_value}")
-                    reset_dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"entity_index":entity_index,"value":reset_value}))  
+                    reset_dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":reset_value}))  
                 end
-
-                entity_index +=1
             end
             zbm_mqtt_bridge.dispatch_value(device_info,category_name,dispatch_data)
             zbm_mqtt_bridge.dispatch_value(device_info,category_name,reset_dispatch_data)
@@ -2999,6 +3062,11 @@ class ZbmWebUI
                 if !schemas.contains(include_name) && !known.contains(include_name)
                     return f"{schema_name} includes {include_name}, which is not in the registry"
                 end
+            end
+            try
+                ZbmSchemaProcessorInfo.relay_numbers(schemas[schema_name].find("relays",{}))
+            except .. as e,m
+                return f"in {schema_name}, {m}"
             end
         end
         for key : mappings.keys()
