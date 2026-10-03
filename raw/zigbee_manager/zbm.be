@@ -1050,8 +1050,16 @@ class ZbmMqttBridge
                 relays.push(1)
                 
                 if relay_components.contains("set_value")
-                    self.topic_subscriptions.push(f"cmnd/{device_info.name}/Power{index}")
-                    mqtt.subscribe(f"cmnd/{device_info.name}/Power{index}",
+                    var topic = f"cmnd/{device_info.name}/Power{index}"
+                    # a device is configured again when mqtt reconnects or its schema is
+                    # pulled again. drop the listener added last time, otherwise every
+                    # command would be sent to the device once per configuration
+                    if self.topic_subscriptions.find(topic) != nil
+                        mqtt.unsubscribe(topic)
+                    else
+                        self.topic_subscriptions.push(topic)
+                    end
+                    mqtt.subscribe(topic,
                         /topic,index,payload_s,payload_b -> 
                             self.relay_command_handler(device_info,index,relay_components,relay_name,payload_s) 
                     )
