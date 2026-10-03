@@ -417,11 +417,11 @@ class ZbmSchemaProcessorInfo
     static def fn_info(value)
         var matches
 
-        if matches := re.match("^\\s*/\\s*([a-zA-Z0-0,_ ]*)(->.+)\\s*$",value)
+        if matches := re.match("^\\s*/\\s*([a-zA-Z0-9,_ ]*)(->.+)\\s*$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_LAMBDA,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*\\(([a-zA-Z0-0,_ ]*)\\)(.*?end)\\s*$",value)
+        elif matches :=re.match("^\\s*def\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.*?end)\\s*$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_ANON_DEF,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*([a-zA-Z0-9_]+)\\s*\\(([a-zA-Z0-0,_ ]*)\\)(.+*end)\\s*$",value)
+        elif matches :=re.match("^\\s*def\\s*([a-zA-Z0-9_]+)\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.+end)\\s*$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_NAMED_DEF,"args":matches[2],"rest":matches[3],"name":matches[1]})
         end
 
@@ -447,7 +447,9 @@ class ZbmSchemaProcessorInfo
             elif [_class.FN_TYPE_LAMBDA,_class.FN_TYPE_ANON_DEF].find(info.type) != nil
                 fn_string = f"return {info.all}"
             else
-                fn_string = f"{info.all} return {info.name}"
+                # compiled as an anonymous function, a named def at the top level of the
+                # compiled code would define a global and could replace one, like log
+                fn_string = f"return def ({info.args}){info.rest}"
             end
             return ZbmCompiledFunction(compile(fn_string)())
         except .. as e,m
