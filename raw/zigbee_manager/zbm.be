@@ -2606,11 +2606,13 @@ class ZbmWebUI
             self.message = nil
         end
 
+        webserver.content_button(webserver.BUTTON_MAIN)
+
         var pull_button = "<button name='act' value='pull'>Pull schemas</button>"
         if zbm_schema_puller != nil
             pull_button = "<button type='button' disabled>Pulling schemas...</button>"
         end
-        webserver.content_send("<form method='post' action='zbman' class='zt'><button name='act' value='poll'>Poll devices</button>" + pull_button + "</form><p></p>")
+        webserver.content_send("<p></p><form method='post' action='zbman' class='zt'><button name='act' value='poll'>Poll devices</button>" + pull_button + "</form><p></p>")
 
         var devices = self.sorted_devices()
         webserver.content_send(f"<fieldset><legend><b>&nbsp;Devices ({size(devices)})&nbsp;</b></legend>")
@@ -2621,8 +2623,6 @@ class ZbmWebUI
             self.send_device(device_info)
         end
         webserver.content_send("</fieldset>")
-
-        webserver.content_button(webserver.BUTTON_MAIN)
         webserver.content_stop()
     end
 
