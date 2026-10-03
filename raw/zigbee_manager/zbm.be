@@ -16,6 +16,7 @@ var zbm_mqtt_bridge = nil
 var zbm_schema_registry = nil
 var zbm_service = nil
 var zbm_schema_puller = nil
+var zbm_web_ui = nil
 
 def _join(li, sep, fn)
     var result = ""
@@ -416,11 +417,11 @@ class ZbmSchemaProcessorInfo
     static def fn_info(value)
         var matches
 
-        if matches := re.match("^\\s*/\\s*([a-zA-Z0-0,_ ]*)(->.+)\\s*$",value)
+        if matches := re.match("^\\s*/\\s*([a-zA-Z0-9,_ ]*)(->.+)\\s*$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_LAMBDA,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*\\(([a-zA-Z0-0,_ ]*)\\)(.*?end)\\s*$",value)
+        elif matches :=re.match("^\\s*def\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.*?end)\\s*$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_ANON_DEF,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*([a-zA-Z0-9_]+)\\s*\\(([a-zA-Z0-0,_ ]*)\\)(.+*end)\\s*$",value)
+        elif matches :=re.match("^\\s*def\\s*([a-zA-Z0-9_]+)\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.+end)\\s*$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_NAMED_DEF,"args":matches[2],"rest":matches[3],"name":matches[1]})
         end
 
@@ -446,7 +447,9 @@ class ZbmSchemaProcessorInfo
             elif [_class.FN_TYPE_LAMBDA,_class.FN_TYPE_ANON_DEF].find(info.type) != nil
                 fn_string = f"return {info.all}"
             else
-                fn_string = f"{info.all} return {info.name}"
+                # compiled as an anonymous function, a named def at the top level of the
+                # compiled code would define a global and could replace one, like log
+                fn_string = f"return def ({info.args}){info.rest}"
             end
             return ZbmCompiledFunction(compile(fn_string)())
         except .. as e,m
@@ -458,7 +461,7 @@ class ZbmSchemaProcessorInfo
     static var schema_category_layout = {
         ZbmSchemaItem("catageory", _class.value_in(_class.categories), _class.OPTIONAL): {
             ZbmSchemaItem("element_name", _class.valid_name("element_name"), _class.OPTIONAL): {
-                ZbmSchemaItem("functions", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
+                ZbmSchemaItem(f"one of {_join(_class.fn_components, ', ')}", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
                 ZbmSchemaItem("others", _class.value_in(["format_category"]), _class.OPTIONAL): ZbmSchemaItem("function_item",_class.valid_name( "name")),
             }
         },
@@ -615,7 +618,7 @@ class ZbmSchemaProcessor
             end
 
             if size(required_keys) > 0
-                var missing = _join(required_keys, ', ', / v -> str(v.value))
+                var missing = _join(required_keys, ', ', / v -> v.debug_name)
                 raise "validation_error", f"missing required keys '{missing}' at level {level}"
             end
             result = storage
@@ -823,6 +826,29 @@ class ZbmSchemaRegistry : ZbmNotify
 
         self.set_registry(processed_schema)
 
+    end
+
+    # adds the schemas and mappings in schema_json, unlike add_schema a schema that is
+    # already in the registry is replaced as a whole, so anything removed from it goes too
+    def replace_schemas(schema_json)
+
+        self.validate_schema(schema_json)
+
+        var replaced = schema_json.find("schemas",{})
+        var kept = {}
+        for schema_name : self.registry["schemas"].keys()
+            if !replaced.contains(schema_name)
+                kept[schema_name] = self.registry["schemas"][schema_name]
+            end
+        end
+
+        var processed_schema = ZbmSchemaProcessor.process_schemas(
+            [{"version":self.registry["version"],"mappings":self.registry["mappings"],"schemas":kept},schema_json],
+            ZbmSchemaProcessorInfo.schema_layout,
+            true,
+            false)
+
+        self.set_registry(processed_schema)
     end
 
     def remove_schema(schema_name)
@@ -1050,8 +1076,16 @@ class ZbmMqttBridge
                 relays.push(1)
                 
                 if relay_components.contains("set_value")
-                    self.topic_subscriptions.push(f"cmnd/{device_info.name}/Power{index}")
-                    mqtt.subscribe(f"cmnd/{device_info.name}/Power{index}",
+                    var topic = f"cmnd/{device_info.name}/Power{index}"
+                    # a device is configured again when mqtt reconnects or its schema is
+                    # pulled again. drop the listener added last time, otherwise every
+                    # command would be sent to the device once per configuration
+                    if self.topic_subscriptions.find(topic) != nil
+                        mqtt.unsubscribe(topic)
+                    else
+                        self.topic_subscriptions.push(topic)
+                    end
+                    mqtt.subscribe(topic,
                         /topic,index,payload_s,payload_b -> 
                             self.relay_command_handler(device_info,index,relay_components,relay_name,payload_s) 
                     )
@@ -1208,8 +1242,8 @@ class ZbmState : ZbmNotify
         end 
 
     def reset()
-        for key : ZbmState.config_defaults
-            zbm_state.info[key] = ZbmState.config_defaults[key]
+        for key : self.config_defaults.keys()
+            self.setmember(key,self.config_defaults[key])
         end
         persist.zbm_state  = nil
         persist.save(true)
@@ -2004,7 +2038,7 @@ def zbm_remove_mapping(cmnd_name, idx, payload, payload_json)
     if !zbm_schema_registry.remove_mapping(key)
         return tasmota.resp_cmnd_error()
     end
-    tasmota.resp_cmnd({"ZbmRemovemapping":f"{key}"})
+    tasmota.resp_cmnd(json.dump({"ZbmRemoveMapping":key}))
 end
 
 
@@ -2079,9 +2113,9 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
         end
         if ttype == "bool"
             if type(argv) == "string"
-                if re.match("^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|1)$",argv)
+                if re.match("^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]|1)$",argv)
                     return true
-                elif re.match("^([Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|1)$",argv)
+                elif re.match("^([Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]|0)$",argv)
                     return false
                 end
             end
@@ -2164,9 +2198,10 @@ class ZbmSchemaPuller
     # from the repository. each step runs from its own timer and makes at most one
     # request, so no single call gets near the time berry code is allowed to run for
     # (USE_BERRY_TIMEOUT, 4s by default) and tasmota keeps servicing mqtt, the web ui
-    # and zigbee while the files download. the files are validated as they arrive but
-    # only merged into the registry once all of them have been fetched, so a pull that
-    # fails leaves the registry as it was.
+    # and zigbee while the files download. the schemas are always downloaded, even when
+    # already in the registry, as the repository may have newer versions. each file
+    # replaces the schemas it defines as soon as it has been downloaded, then the added
+    # devices using them are configured again so the changes take effect.
 
     static var url_base = "https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
     static var timer_id = "zbm_pull_schemas"
@@ -2179,8 +2214,9 @@ class ZbmSchemaPuller
     var manifests
     var pending
     var requested
-    var schema_jsons
+    var found
     var downloaded
+    var reconfigure
     var step
     var attempts
     var running
@@ -2196,8 +2232,9 @@ class ZbmSchemaPuller
         self.manifests = []
         self.pending = []
         self.requested = {}
-        self.schema_jsons = []
+        self.found = []
         self.downloaded = []
+        self.reconfigure = []
         self.attempts = 0
         self.running = false
     end
@@ -2316,6 +2353,7 @@ class ZbmSchemaPuller
                 var key_index = self.keys.find(mapping)
                 if key_index != nil
                     self.keys.remove(key_index)
+                    self.found.push(mapping)
                     self.log.info(f"found schema {schema_name} for {mapping}")
                     self.request(schema_name)
                 end
@@ -2324,31 +2362,48 @@ class ZbmSchemaPuller
         self.next(/-> self.search_manifest())
     end
 
-    # downloads one schema file per step, queueing the schemas it includes
+    # downloads one schema file per step and replaces the schemas it defines in the
+    # registry, queueing the schemas it includes
     def download_schema()
+        if !size(self.pending)
+            for device_info : zbm_service.device_infos.iter()
+                if (device_info.status & ZbmDeviceStatus.Added) && self.found.find(device_info.key) != nil
+                    self.reconfigure.push(device_info)
+                end
+            end
+            self.next(/-> self.reconfigure_device())
+            return
+        end
+
         var schema_name = self.pending[0]
         var schema_json = self.fetch(f"{schema_name}.json")
-        zbm_schema_registry.validate_schema(schema_json)
-        self.pending.remove(0)
-        self.schema_jsons.push(schema_json)
-        self.downloaded.push(schema_name)
+        zbm_schema_registry.replace_schemas(schema_json)
+        self.log.info(f"replaced schema {schema_name}")
 
+        self.pending.remove(0)
+        self.downloaded.push(schema_name)
         for schema : schema_json.find("schemas",{})
             for include_name : schema.find("include",[])
                 self.request(include_name)
             end
         end
-
-        if size(self.pending)
-            self.next(/-> self.download_schema())
-        else
-            self.next(/-> self.commit())
-        end
+        self.next(/-> self.download_schema())
     end
 
-    def commit()
-        zbm_schema_registry.add_schemas(self.schema_jsons)
-        self.finish()
+    # configures one added device per step with its replaced schema, so new or
+    # removed entities show up over mqtt without restarting
+    def reconfigure_device()
+        if !size(self.reconfigure)
+            self.finish()
+            return
+        end
+        var device_info = self.reconfigure[0]
+        self.reconfigure.remove(0)
+        if zbm_service.has_device(device_info.shortaddr) && (device_info.status & ZbmDeviceStatus.Added)
+            self.log.info(f"configuring {device_info.name} with the updated schema")
+            zbm_service.configure_device(device_info)
+        end
+        self.next(/-> self.reconfigure_device())
     end
 
     def finish(error)
@@ -2362,8 +2417,9 @@ class ZbmSchemaPuller
             self.log.info(f"pulled schemas {self.downloaded}")
             result["Schemas"] = self.downloaded
         else
-            self.log.error(f"unable to pull schemas, registry left unchanged - {error}")
+            self.log.error(f"unable to pull schemas - {error}")
             result["Error"] = error
+            result["Schemas"] = self.downloaded
         end
         if size(self.keys)
             self.log.info(f"no schema found for {self.keys}")
@@ -2379,13 +2435,10 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
         return log_cmnd_error(cmnd_name,"a schema pull is already in progress")
     end
 
+    # every device is included, also those already added, as the schemas in the
+    # repository may have been updated since they were pulled
     var request_list = []
     for device_info : zbm_service.device_infos.iter()
-
-        if (device_info.status & ZbmDeviceStatus.Added) && 
-            !(device_info.status & (ZbmDeviceStatus.NoDefaultKey | ZbmDeviceStatus.SchemaNotFound | ZbmDeviceStatus.MappingNotFound))
-            continue
-        end
 
         if ["",nil].find(device_info.key) != nil && 
             (["",nil].find(device_info.manufacturer) != nil || 
@@ -2404,7 +2457,7 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
     end
 
     if !size(request_list)
-        log_cmnd_info(cmnd_name,"no devices without a schema")
+        log_cmnd_info(cmnd_name,"no devices with a key to pull schemas for")
         return tasmota.resp_cmnd_done()
     end
 
@@ -2412,6 +2465,656 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
     zbm_schema_puller = ZbmSchemaPuller(request_list)
     zbm_schema_puller.start()
     tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Keys":zbm_schema_puller.keys}}))
+end
+
+class ZbmWebUI
+    # the "Zigbee Manager" pages, opened from a button on the main page. Devices lists the
+    # devices with buttons to add, reset, remove and rename them, Schemas the schemas and
+    # mappings in the registry, and Settings the values ZbmConfig changes
+
+    static var url = "/zbman"     # not /zbm, that is the url of tasmota's own Zigbee Map page
+    static var problem_flags = ZbmDeviceStatus.Unnamed | ZbmDeviceStatus.MappingNotFound | ZbmDeviceStatus.SchemaNotFound |
+                               ZbmDeviceStatus.SchemaCompileFailed | ZbmDeviceStatus.NotFound | ZbmDeviceStatus.NoDefaultKey
+    static var schema_flags = ZbmDeviceStatus.MappingNotFound | ZbmDeviceStatus.SchemaNotFound | ZbmDeviceStatus.SchemaCompileFailed
+    static var settings = [
+        ["auto_poll_devices","Poll devices automatically","Look for devices joining or leaving the bridge every poll period."],
+        ["auto_poll_devices_period","Poll period (seconds)",nil],
+        ["auto_add_devices","Add devices automatically","Add named devices that have a schema without pressing Add."],
+        ["auto_remove_devices","Remove devices that leave","Drop devices from the list once they are no longer paired with the bridge."],
+        ["auto_name_devices","Name devices automatically","Name unnamed devices manufacturer-model when they are added. Not recommended."],
+        ["auto_key_devices","Key devices by manufacturer:model","The schemas in the repository are mapped from these keys."],
+        ["log_level","Log level",nil]
+    ]
+    static var log_levels = ["None","Error","Info","Debug"]
+    static var style = "<style>"
+        ".zd{background:var(--c_bg);border-radius:0.3em;margin:5px 0;padding:5px 6px;}"
+        ".zh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;}"
+        ".zs{font-size:0.85em;text-align:right;}"
+        ".zi{width:100%;font-size:0.85em;border-spacing:0;margin-top:3px;}"
+        ".zi td{padding:0 2px;vertical-align:top;overflow-wrap:anywhere;}"
+        ".zi td:first-child{width:32%;opacity:0.7;}"
+        ".zn{font-size:0.8em;margin:4px 0 0;}"
+        ".zr{display:flex;gap:5px;margin-top:5px;padding:0;align-items:center;}"
+        ".zr input,.zr select,.zk{flex:1;min-width:0;width:auto;}"
+        ".zk{overflow-wrap:anywhere;font-size:0.9em;}"
+        ".zb{flex:1;width:auto;line-height:1.8rem;font-size:0.9rem;padding:0 8px;}"
+        ".zr input+.zb,.zr select+.zb,.zk+.zb{flex:none;}"
+        ".zm{border-radius:0.3em;margin:5px 0;color:var(--c_btntxt);text-align:center;}"
+        ".za{width:100%;height:160px;box-sizing:border-box;font-family:monospace;font-size:0.8em;}"
+        ".zt{display:flex;gap:5px;padding:0;}"
+        ".zt button{flex:1;width:auto;}"
+        ".zt .zc{background:var(--c_btnoff);}"
+        "button:disabled{opacity:0.5;cursor:default;}"
+        "</style>"
+
+    static var max_schema_size = 16384
+
+    var routes_added
+    var message
+    var draft     # a schema that was rejected, shown again so it can be corrected
+
+    def init()
+        import webserver
+        self.routes_added = false
+        tasmota.add_driver(self)
+        # tasmota only sends web_add_handler once, when the web server starts. if the
+        # extension is started later, from the extensions page, the server is already
+        # running and the pages are added straight away
+        if webserver.state() != webserver.HTTP_OFF
+            self.web_add_handler()
+        end
+    end
+
+    def unload()
+        import webserver
+        tasmota.remove_driver(self)
+        if self.routes_added
+            self.routes_added = false
+            try
+                webserver.remove_route(self.url,webserver.HTTP_GET)
+                webserver.remove_route(self.url,webserver.HTTP_POST)
+            except .. as e,m
+                ZbmLogger("web_ui").debug(f"unable to remove the pages - {e} {m}")
+            end
+        end
+    end
+
+    def web_add_handler()
+        import webserver
+        if self.routes_added
+            return
+        end
+        webserver.on(self.url,/-> self.page(),webserver.HTTP_GET)
+        webserver.on(self.url,/-> self.page_action(),webserver.HTTP_POST)
+        self.routes_added = true
+    end
+
+    def web_add_main_button()
+        import webserver
+        webserver.content_send("<p></p><form id=but_zbman style='display:block;' action='zbman' method='get'><button>Zigbee Manager</button></form>")
+    end
+
+    static def text(value)
+        import webserver
+        if value == nil || value == ""
+            return "-"
+        end
+        return webserver.html_escape(str(value))
+    end
+
+    static def device_label(device_info)
+        var name = ["",nil].find(device_info.name) == nil ? device_info.name : "unnamed device"
+        return f"{name} ({device_info.deviceid})"
+    end
+
+    static def last_seen(lastseen)
+        if lastseen == nil || lastseen <= 0
+            return "never"
+        end
+        var seconds = tasmota.rtc()["utc"] - lastseen
+        if seconds < 0
+            return tasmota.strftime("%Y-%m-%d %H:%M:%S",lastseen)
+        elif seconds < 60
+            return f"{seconds}s ago"
+        elif seconds < 3600
+            return f"{seconds / 60} min ago"
+        elif seconds < 86400
+            return f"{seconds / 3600} h ago"
+        end
+        return f"{seconds / 86400} days ago"
+    end
+
+    # sorts by sort_key, a function returning a string for each item
+    static def sorted(items,sort_key)
+        var result = []
+        for item : items
+            var key = sort_key(item)
+            var index = 0
+            while index < size(result) && sort_key(result[index]) <= key
+                index += 1
+            end
+            result.insert(index,item)
+        end
+        return result
+    end
+
+    # devices with a name first, in name order, then the unnamed ones
+    def sorted_devices()
+        return self.sorted(zbm_service.device_infos.iter(),def (device_info)
+            var name = device_info.name
+            return (["",nil].find(name) == nil ? "0" + string.tolower(name) : "1") + device_info.deviceid
+        end)
+    end
+
+    def find_device(deviceid)
+        for device_info : zbm_service.device_infos.iter()
+            if device_info.deviceid == deviceid
+                return device_info
+            end
+        end
+        return nil
+    end
+
+    def page()
+        import webserver
+        if !webserver.check_privileged_access() return nil end
+
+        var page = webserver.arg("p")
+        if page != "schemas" && page != "settings"
+            page = ""
+        end
+
+        webserver.content_start("Zigbee Manager")
+        webserver.content_send_style()
+        webserver.content_send(self.style)
+        webserver.content_send("<div style='padding:0 5px;text-align:center;'><h3><hr>Zigbee Manager<hr></h3></div>")
+
+        if self.message != nil
+            var background = self.message[1] ? "var(--c_btnsv)" : "var(--c_btnrst)"
+            webserver.content_send(f"<div class='zm' style='background:{background};'>{webserver.html_escape(self.message[0])}</div>")
+            self.message = nil
+        end
+
+        webserver.content_button(webserver.BUTTON_MAIN)
+        var nav = "<p></p><form action='zbman' method='get' class='zt'>"
+        for entry : [["","Devices"],["schemas","Schemas"],["settings","Settings"]]
+            var current = entry[0] == page ? " class='zc'" : ""
+            nav += f"<button name='p' value='{entry[0]}'{current}>{entry[1]}</button>"
+        end
+        webserver.content_send(nav + "</form><p></p>")
+
+        if page == "schemas"
+            self.send_schemas()
+        elif page == "settings"
+            self.send_settings()
+        else
+            self.send_devices()
+        end
+        webserver.content_stop()
+    end
+
+    def send_devices()
+        import webserver
+        var pull_button = "<button name='act' value='pull'>Pull schemas</button>"
+        if zbm_schema_puller != nil
+            pull_button = "<button type='button' disabled>Pulling schemas...</button>"
+        end
+        webserver.content_send("<form method='post' action='zbman' class='zt'><button name='act' value='poll'>Poll devices</button>" + pull_button + "</form><p></p>")
+
+        var devices = self.sorted_devices()
+        webserver.content_send(f"<fieldset><legend><b>&nbsp;Devices ({size(devices)})&nbsp;</b></legend>")
+        if !size(devices)
+            webserver.content_send("<p><small><i>No zigbee devices found yet.</i></small></p>")
+        end
+        for device_info : devices
+            self.send_device(device_info)
+        end
+        webserver.content_send("</fieldset>")
+    end
+
+    def send_device(device_info)
+        import webserver
+        var status = device_info.status
+        var named = ["",nil].find(device_info.name) == nil
+        var name = named ? webserver.html_escape(device_info.name) : ""
+        var title = named ? name : "<i>unnamed</i>"
+        var deviceid = webserver.html_escape(device_info.deviceid)
+
+        var status_text = "Not added"
+        var status_style = ""
+        if status == ZbmDeviceStatus.Added
+            status_text = "Added"
+            status_style = " style='color:var(--c_btnsv);'"
+        elif status != 0
+            status_text = _join(ZbmDeviceStatus.descriptions(status),", ")
+            if status & self.problem_flags
+                status_style = " style='color:var(--c_txtwrn);'"
+            end
+        end
+
+        var schema_name = device_info.key != nil ? zbm_schema_registry.mapping(device_info.key) : nil
+        var battery = (device_info.battery != nil && device_info.battery >= 0) ? f"{device_info.battery}%" : nil
+
+        webserver.content_send(f"<div class='zd'><div class='zh'><b>{title}</b><span class='zs'{status_style}>{webserver.html_escape(status_text)}</span></div>")
+        webserver.content_send("<table class='zi'>")
+        for row : [["Device",device_info.deviceid],
+                   ["Manufacturer",device_info.manufacturer],
+                   ["Model",device_info.model],
+                   ["Key",device_info.key],
+                   ["Schema",schema_name],
+                   ["Link quality",device_info.lqi],
+                   ["Battery",battery],
+                   ["Last seen",self.last_seen(device_info.lastseen)]]
+            webserver.content_send(f"<tr><td>{row[0]}</td><td>{self.text(row[1])}</td></tr>")
+        end
+        webserver.content_send("</table>")
+
+        var hint
+        if !(status & ZbmDeviceStatus.Added)
+            if status & ZbmDeviceStatus.Removed
+                hint = "Reset the device to be able to add it again."
+            elif !named
+                hint = zbm_state.auto_name_devices ? "Enter a name and press Add, or press Add to name it automatically." : "Enter a name and press Add."
+            elif status & (ZbmDeviceStatus.MappingNotFound | ZbmDeviceStatus.SchemaNotFound)
+                hint = "There is no schema for this device's key. Pull schemas, or add a schema or mapping for it, then add the device again."
+            elif status & ZbmDeviceStatus.SchemaCompileFailed
+                hint = "The schema for this device failed to compile, see the console."
+            elif status & ZbmDeviceStatus.NoDefaultKey
+                hint = "The device has not reported its manufacturer and model yet, so it has no key."
+            end
+        end
+        if hint != nil
+            webserver.content_send(f"<p class='zn'>{hint}</p>")
+        end
+
+        var rename_label = named ? "Rename" : "Set name"
+        webserver.content_send(f"<form method='post' action='zbman'><input type='hidden' name='dev' value='{deviceid}'>")
+        webserver.content_send(f"<div class='zr'><input name='name' value='{name}' maxlength='32' placeholder='Device name'><button class='zb' name='act' value='rename'>{rename_label}</button></div>")
+        webserver.content_send("<div class='zr'>")
+        if !(status & (ZbmDeviceStatus.Added | ZbmDeviceStatus.Removed))
+            webserver.content_send("<button class='zb bgrn' name='act' value='add'>Add</button>")
+        end
+        if status != 0
+            webserver.content_send("<button class='zb' name='act' value='reset'>Reset</button>")
+        end
+        if !(status & ZbmDeviceStatus.Removed)
+            webserver.content_send("<button class='zb bred' name='act' value='remove' onclick='return confirm(\"Remove this device?\")'>Remove</button>")
+        end
+        webserver.content_send("</div></form></div>")
+    end
+
+    def send_schemas()
+        import webserver
+        var registry = zbm_schema_registry.registry
+        var schemas = registry.find("schemas",{})
+        var mappings = registry.find("mappings",{})
+        var schema_names = self.sorted(schemas.keys(),/ name -> string.tolower(name))
+
+        webserver.content_send(f"<fieldset><legend><b>&nbsp;Schemas ({size(schema_names)})&nbsp;</b></legend>")
+        if !size(schema_names)
+            webserver.content_send("<p><small><i>No schemas yet. Pull them from the devices page, or add them with ZbmAddSchema.</i></small></p>")
+        end
+        for schema_name : schema_names
+            var schema = schemas[schema_name]
+            var keys = []
+            for key : mappings.keys()
+                if mappings[key] == schema_name
+                    keys.push(key)
+                end
+            end
+            var rows = [["Includes",_join(schema.find("include",[]),", ")]]
+            for category : ZbmSchemaProcessorInfo.categories
+                if schema.contains(category)
+                    rows.push([string.toupper(category[0]) + category[1..],_join(to_list(schema[category].keys()),", ")])
+                end
+            end
+            rows.push(["Mapped from",_join(keys,", ")])
+
+            var escaped_name = webserver.html_escape(schema_name)
+            webserver.content_send(f"<div class='zd'><div class='zh'><b>{escaped_name}</b></div><table class='zi'>")
+            for row : rows
+                webserver.content_send(f"<tr><td>{row[0]}</td><td>{self.text(row[1])}</td></tr>")
+            end
+            webserver.content_send(f"</table><form method='post' action='zbman'><input type='hidden' name='schema' value='{escaped_name}'><div class='zr'>")
+            webserver.content_send("<button class='zb bred' name='act' value='remove_schema' onclick='return confirm(\"Remove this schema?\")'>Remove</button></div></form></div>")
+        end
+        webserver.content_send("</fieldset><p></p>")
+
+        var draft = self.draft != nil ? webserver.html_escape(self.draft) : ""
+        self.draft = nil
+        webserver.content_send("<fieldset><legend><b>&nbsp;Upload a schema&nbsp;</b></legend><form method='post' action='zbman'>")
+        webserver.content_send("<p class='zn'>Paste a schema, or load one from a file. It is checked before it is added, and replaces a schema with the same name.</p>")
+        webserver.content_send("<p><input type='file' accept='.json,application/json' onchange='var r=new FileReader();r.onload=function(){eb(\"zbs\").value=r.result};r.readAsText(this.files[0])'></p>")
+        webserver.content_send("<textarea id='zbs' name='schema_json' class='za' spellcheck='false' placeholder='{\"version\":1,\"mappings\":{...},\"schemas\":{...}}'>" + draft + "</textarea>")
+        webserver.content_send("<button class='bgrn' name='act' value='add_schema'>Upload schema</button></form></fieldset><p></p>")
+
+        var keys = self.sorted(mappings.keys(),/ key -> string.tolower(key))
+        webserver.content_send(f"<fieldset><legend><b>&nbsp;Mappings ({size(keys)})&nbsp;</b></legend>")
+        for key : keys
+            var escaped_key = webserver.html_escape(key)
+            webserver.content_send(f"<form method='post' action='zbman'><input type='hidden' name='key' value='{escaped_key}'><div class='zr'>")
+            webserver.content_send(f"<span class='zk'>{escaped_key}<br><small>&rarr; {webserver.html_escape(mappings[key])}</small></span>")
+            webserver.content_send("<button class='zb bred' name='act' value='remove_mapping' onclick='return confirm(\"Remove this mapping?\")'>Remove</button></div></form>")
+        end
+
+        # the keys of the devices without a mapping are offered when adding one
+        var device_keys = []
+        for device_info : zbm_service.device_infos.iter()
+            if device_info.key != nil && !mappings.contains(device_info.key) && device_keys.find(device_info.key) == nil
+                device_keys.push(device_info.key)
+            end
+        end
+        webserver.content_send("<p class='zn'>Map a device key to a schema</p><form method='post' action='zbman'>")
+        webserver.content_send("<div class='zr'><input name='key' list='zbkeys' placeholder='manufacturer:model'><datalist id='zbkeys'>")
+        for key : device_keys
+            webserver.content_send(f"<option value='{webserver.html_escape(key)}'>")
+        end
+        webserver.content_send("</datalist></div><div class='zr'><select name='schema'>")
+        for schema_name : schema_names
+            var escaped_name = webserver.html_escape(schema_name)
+            webserver.content_send(f"<option value='{escaped_name}'>{escaped_name}</option>")
+        end
+        var disabled = size(schema_names) ? "" : " disabled"
+        webserver.content_send(f"</select><button class='zb bgrn' name='act' value='add_mapping'{disabled}>Add mapping</button></div></form>")
+        webserver.content_send("</fieldset><p></p>")
+
+        webserver.content_send("<form method='post' action='zbman'><button class='bred' name='act' value='reset_schemas' onclick='return confirm(\"Remove every schema and mapping?\")'>Reset schemas</button></form>")
+    end
+
+    def send_settings()
+        import webserver
+        webserver.content_send("<fieldset><legend><b>&nbsp;Settings&nbsp;</b></legend><form method='post' action='zbman'>")
+        for setting : self.settings
+            var key = setting[0]
+            var value = zbm_state.info[key]
+            if key == "auto_poll_devices_period"
+                webserver.content_send(f"<p><b>{setting[1]}</b><br><input type='number' name='{key}' min='1' max='3600' value='{value}'></p>")
+            elif key == "log_level"
+                var options = ""
+                for level : 0..size(self.log_levels)-1
+                    var selected = level == value ? " selected" : ""
+                    options += f"<option value='{level}'{selected}>{self.log_levels[level]}</option>"
+                end
+                webserver.content_send(f"<p><b>{setting[1]}</b><br><select name='{key}'>{options}</select></p>")
+            else
+                var checked = value ? " checked" : ""
+                webserver.content_send(f"<p><label><input type='checkbox' name='{key}'{checked}><b>{setting[1]}</b></label><br><small>{setting[2]}</small></p>")
+            end
+        end
+        webserver.content_send("<button class='bgrn' name='act' value='save_settings'>Save</button></form></fieldset><p></p>")
+        webserver.content_send("<form method='post' action='zbman'><button class='bred' name='act' value='reset_settings' onclick='return confirm(\"Reset the settings to their defaults?\")'>Reset settings</button></form>")
+    end
+
+    def page_action()
+        import webserver
+        if !webserver.check_privileged_access() return nil end
+
+        var action = webserver.arg("act")
+        var page = ""
+        try
+            if ["add_schema","remove_schema","reset_schemas","add_mapping","remove_mapping"].find(action) != nil
+                page = "schemas"
+                self.message = self.run_schema_action(action)
+            elif ["save_settings","reset_settings"].find(action) != nil
+                page = "settings"
+                self.message = self.run_settings_action(action)
+            else
+                self.message = self.run_device_action(action,webserver.arg("dev"),webserver.arg("name"))
+            end
+        except .. as e,m
+            self.message = [f"{e}, {m}",false]
+        end
+        webserver.redirect(size(page) ? f"{self.url}?p={page}" : self.url)
+    end
+
+    # returns [message, success]
+    def run_device_action(action,deviceid,name)
+        if action == "poll"
+            zbm_service.update_available_devices()
+            return ["Devices polled",true]
+        elif action == "pull"
+            return self.pull_schemas()
+        end
+
+        var device_info = self.find_device(deviceid)
+        if device_info == nil
+            return [f"Device {deviceid} not found",false]
+        end
+        var label = self.device_label(device_info)
+
+        if action == "add"
+            return self.add_device(device_info,name)
+        elif action == "reset"
+            zbm_service.reset_device(device_info)
+            return [f"Reset {label}",true]
+        elif action == "remove"
+            zbm_service.remove_device(device_info)
+            return [f"Removed {label}",true]
+        elif action == "rename"
+            return self.rename_device(device_info,name)
+        end
+        return [f"Unknown action '{action}'",false]
+    end
+
+    # names a device with ZbName, returns an error message or nil once it is named
+    def set_name(device_info,name)
+        if !size(name) || size(name) > 32 || !re.match("^[a-zA-Z0-9 ._-]+$",name)
+            return "A name can have up to 32 letters, digits, spaces, '.', '_' or '-'"
+        end
+        var label = self.device_label(device_info)
+        tasmota.cmd(f"ZbName {device_info.deviceid},{name}")
+        zbm_service.update_available_devices()
+        if device_info.name != name
+            return f"Unable to name {label} {name}"
+        end
+        return nil
+    end
+
+    def add_device(device_info,name)
+        # a name entered before pressing Add is set first
+        name = strip(name != nil ? name : "")
+        if size(name) && name != device_info.name
+            var error = self.set_name(device_info,name)
+            if error != nil
+                return [error,false]
+            end
+        end
+
+        # naming the device may already have added it, with auto_add_devices on
+        if !(device_info.status & ZbmDeviceStatus.Added)
+            # adding from the page is a retry, the schema errors left by an earlier attempt
+            # are cleared as the registry may have changed since
+            device_info.status &= ~self.schema_flags
+            zbm_service.add_device(device_info)
+            # with auto_name_devices on, the first attempt only names an unnamed device
+            if device_info.status == 0 && zbm_state.auto_name_devices && ["",nil].find(device_info.name) == nil
+                zbm_service.add_device(device_info)
+            end
+        end
+
+        var label = self.device_label(device_info)
+        if device_info.status & ZbmDeviceStatus.Added
+            return [f"Added {label}",true]
+        elif ["",nil].find(device_info.name) != nil
+            return [f"Enter a name for {label} to add it",false]
+        end
+        var reasons = ZbmDeviceStatus.descriptions(device_info.status)
+        return [f"Unable to add {label} - {size(reasons) ? _join(reasons, ', ') :: 'see the console'}",false]
+    end
+
+    def rename_device(device_info,name)
+        name = strip(name != nil ? name : "")
+        var label = self.device_label(device_info)
+        if name == device_info.name
+            return [f"{label} already has that name",true]
+        end
+
+        var was_added = (device_info.status & ZbmDeviceStatus.Added) != 0
+        var error = self.set_name(device_info,name)
+        if error != nil
+            return [error,false]
+        end
+        if !was_added
+            return [f"Renamed {label} to {name}",true]
+        end
+
+        # an added device publishes to topics named after it, so it is added again
+        # to move them to the new name
+        zbm_service.reset_device(device_info)
+        if zbm_service.add_device(device_info) == nil
+            return [f"Renamed {label} to {name}, but it could not be added again",false]
+        end
+        return [f"Renamed {label} to {name} and added it again under the new name",true]
+    end
+
+    def pull_schemas()
+        var response = tasmota.cmd("ZbmPullSchemas")
+        var result = isinstance(response,map) ? response.find("ZbmPullSchemas") : nil
+        if isinstance(result,map) && result.find("Status") == "Started"
+            return ["Pulling schemas, the result is shown in the console",true]
+        elif result == "Done"
+            return ["No devices with a key to pull schemas for",true]
+        end
+        return ["Unable to start pulling schemas, see the console",false]
+    end
+
+    # returns why schema_json can not be added to the registry, or nil
+    def check_schema(schema_json)
+        try
+            zbm_schema_registry.check_version(schema_json)
+            # the functions are compiled as well, so code that would not run is caught now
+            ZbmSchemaProcessor.process_schemas(schema_json,ZbmSchemaProcessorInfo.schema_layout,false,true)
+        except .. as e,m
+            return m != nil ? f"{e}: {m}" : str(e)
+        end
+
+        var schemas = schema_json.find("schemas",{})
+        var mappings = schema_json.find("mappings",{})
+        if !size(schemas) && !size(mappings)
+            return "it has no schemas or mappings"
+        end
+        var known = zbm_schema_registry.registry["schemas"]
+        for schema_name : schemas.keys()
+            for include_name : schemas[schema_name].find("include",[])
+                if !schemas.contains(include_name) && !known.contains(include_name)
+                    return f"{schema_name} includes {include_name}, which is not in the registry"
+                end
+            end
+        end
+        for key : mappings.keys()
+            if !schemas.contains(mappings[key]) && !known.contains(mappings[key])
+                return f"{key} is mapped to {mappings[key]}, which is not in the registry"
+            end
+        end
+        return nil
+    end
+
+    def upload_schema(text)
+        if !size(strip(text))
+            return ["Paste a schema to upload",false]
+        elif size(text) > self.max_schema_size
+            return [f"The schema is larger than {self.max_schema_size} bytes",false]
+        end
+
+        var schema_json = json.load(text)
+        var error = isinstance(schema_json,map) ? self.check_schema(schema_json) : "it is not valid JSON"
+        if error != nil
+            self.draft = text
+            return [f"Schema rejected, {error}",false]
+        end
+
+        zbm_schema_registry.replace_schemas(schema_json)
+
+        # added devices using the schemas are configured again so the changes take effect
+        var schema_names = to_list(schema_json.find("schemas",{}).keys())
+        for device_info : zbm_service.device_infos.iter()
+            if (device_info.status & ZbmDeviceStatus.Added) && device_info.key != nil &&
+                    schema_names.find(zbm_schema_registry.mapping(device_info.key)) != nil
+                zbm_service.configure_device(device_info)
+            end
+        end
+
+        var mapping_count = size(schema_json.find("mappings",{}))
+        var added = size(schema_names) ? _join(schema_names,", ") : ""
+        if mapping_count
+            added += (size(added) ? " and " : "") + f"{mapping_count} mapping(s)"
+        end
+        return [f"Uploaded {added}",true]
+    end
+
+    def run_schema_action(action)
+        import webserver
+        if action == "add_schema"
+            return self.upload_schema(webserver.arg("schema_json"))
+        elif action == "reset_schemas"
+            zbm_schema_registry.reset()
+            return ["Removed every schema and mapping",true]
+        elif action == "remove_schema"
+            var schema_name = webserver.arg("schema")
+            if !zbm_schema_registry.remove_schema(schema_name)
+                return [f"Schema {schema_name} not found",false]
+            end
+            var keys = []
+            var mappings = zbm_schema_registry.registry["mappings"]
+            for key : mappings.keys()
+                if mappings[key] == schema_name
+                    keys.push(key)
+                end
+            end
+            if size(keys)
+                return [f"Removed schema {schema_name}, it is still mapped from {_join(keys, ', ')}",true]
+            end
+            return [f"Removed schema {schema_name}",true]
+        elif action == "add_mapping"
+            var key = strip(webserver.arg("key"))
+            var schema_name = webserver.arg("schema")
+            if !size(key) || !re.match("^[:a-zA-Z0-9 _-]+$",key)
+                return ["A key can have letters, digits, spaces, ':', '_' or '-'",false]
+            end
+            var current = zbm_schema_registry.mapping(key)
+            if current != nil
+                return [f"{key} is already mapped to {current}, remove that mapping first",false]
+            end
+            if !zbm_schema_registry.add_mapping(key,schema_name)
+                return [f"Unable to map {key} to {schema_name}",false]
+            end
+            return [f"Mapped {key} to {schema_name}",true]
+        elif action == "remove_mapping"
+            var key = webserver.arg("key")
+            if !zbm_schema_registry.remove_mapping(key)
+                return [f"Mapping for {key} not found",false]
+            end
+            return [f"Removed the mapping for {key}",true]
+        end
+    end
+
+    def run_settings_action(action)
+        import webserver
+        if action == "reset_settings"
+            zbm_state.reset()
+            return ["Settings reset to their defaults",true]
+        end
+
+        var period = int(webserver.arg("auto_poll_devices_period"))
+        var log_level = int(webserver.arg("log_level"))
+        if period < 1 || period > 3600
+            return ["The poll period must be between 1 and 3600 seconds",false]
+        elif log_level < 0 || log_level >= size(self.log_levels)
+            return ["Unknown log level",false]
+        end
+
+        for setting : self.settings
+            var key = setting[0]
+            var value = webserver.has_arg(key)    # unchecked check boxes are not sent
+            if key == "auto_poll_devices_period"
+                value = period
+            elif key == "log_level"
+                value = log_level
+            end
+            zbm_state.setmember(key,value)
+        end
+        return ["Settings saved",true]
+    end
 end
 
 class ZbmExtension
@@ -2436,8 +3139,14 @@ class ZbmExtension
         tasmota.add_cmd('ZbmRemoveDevice',zbm_remove_device)
         tasmota.add_cmd('ZbmResetDevice',zbm_reset_device)
         tasmota.add_cmd('ZbmAddMapping',zbm_add_mapping)
-        tasmota.add_cmd('ZbmRemovemapping',zbm_remove_mapping)
+        tasmota.add_cmd('ZbmRemoveMapping',zbm_remove_mapping)
         tasmota.add_cmd('ZbmPullSchemas',zbm_pull_schmeas)
+
+        try
+            zbm_web_ui = ZbmWebUI()
+        except .. as e,m
+            ZbmLogger("web_ui").error(f"web page not available - {e} {m}")
+        end
         print("loaded zbm")
     end
 
@@ -2446,6 +3155,10 @@ class ZbmExtension
         if zbm_schema_puller != nil
             zbm_schema_puller.cancel()
             zbm_schema_puller = nil
+        end
+        if zbm_web_ui != nil
+            zbm_web_ui.unload()
+            zbm_web_ui = nil
         end
         zbm_service.unload()
         zbm_schema_registry.unload()
@@ -2470,7 +3183,7 @@ class ZbmExtension
         tasmota.remove_cmd('ZbmRemoveDevice')
         tasmota.remove_cmd('ZbmResetDevice')
         tasmota.remove_cmd('ZbmAddMapping')
-        tasmota.remove_cmd('ZbmRemovemapping')
+        tasmota.remove_cmd('ZbmRemoveMapping')
         tasmota.remove_cmd('ZbmPullSchemas')
         print("unloaded zbm")
     end
