@@ -171,6 +171,17 @@ Note: it may require some experimentation in the console using tasmotas `ZbSend`
 - The schema can now be added to the registry with `ZbmAddSchema <paste_the_json>`
 - Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manfiest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbPullSchemas` should be all that is required to setup your device.
   
+## Web UI
+
+The extension adds a **Zigbee Manager** button to the main page of the Tasmota web UI. It opens a page listing every device found on the bridge, with its manufacturer, model, key, the schema mapped to that key, link quality, battery, when it was last seen and its status. From there a device can be
+
+- named or renamed, using `ZbName`. A device that is already added is added again, so its MQTT topics follow the new name
+- added, as with `ZbmAddDevice`. Adding from the page also retries a device whose schema was missing or failed to compile earlier
+- reset, as with `ZbmResetDevice`
+- removed, as with `ZbmRemoveDevice`
+
+The **Poll devices** and **Pull schemas** buttons run `ZbmPollDevices` and `ZbmPullSchemas`. The page requires admin access when a web password is set.
+
 ## Exposed commands
 
 All commands are either read only (ro), read write (rw) or, write only (wo). Unelss otherwise specified, arguments to the command can be passed as positionally `ZbmXXX arg`, as key value `ZbmXXX key=value` pairs, or as a json fragment `ZbmXXX {'key':'value,...}`.
