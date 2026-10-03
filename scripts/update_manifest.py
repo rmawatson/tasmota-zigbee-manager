@@ -14,10 +14,11 @@ def update_manifest():
     manifest_path = script_dir / "../schema/"
     all_mappings = {}
     all_manifest_files = []
+    manifest_schemas_by_file = {}   # manifest filename -> its "schemas" entries, in "next" order
+    entry_manifest_file = {}        # manifest entry name -> manifest filename it is listed in
     index = 0
     manifest_filename = "manifest.json"
     last_manifest_filename = manifest_filename
-    last_manifest_schemas = {}
 
     if (manifest_path / manifest_filename).exists():
         while True:
@@ -27,8 +28,10 @@ def update_manifest():
             manifest_schemas = manifest.get("schemas", {})
 
             all_mappings.update(manifest_schemas)
+            manifest_schemas_by_file[manifest_filename] = manifest_schemas
+            for entry_name in manifest_schemas:
+                entry_manifest_file[entry_name] = manifest_filename
             last_manifest_filename = manifest_filename
-            last_manifest_schemas = manifest_schemas
 
             if manifest.get("next") is None:
                 break
@@ -40,18 +43,19 @@ def update_manifest():
             
             manifest_filename = next_manifest_file
             index += 1
+    else:
+        manifest_schemas_by_file[manifest_filename] = {}
     
 
     new_manifest_entries = {}
+    schema_files = {}
     unverified_includes = defaultdict(list)
-    for json_file in (filename for filename in manifest_path.iterdir() if \
+    for json_file in sorted(filename for filename in manifest_path.iterdir() if \
                         filename.name not in all_manifest_files and \
                         filename.name != "index.json" and \
                         filename.suffix == ".json"):
         file_mappings = []
         file_includes = []
-        # if json_file.stem in all_mappings.keys():
-        #     continue
         
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
@@ -64,13 +68,17 @@ def update_manifest():
 
         if "schemas" in json_data:
             for schema_name in json_data["schemas"].keys():
-                if schema_name in all_mappings:
-                    continue  # schema already in manifest, skip it
+                if schema_name in schema_files:
+                    raise ManifestError(f"Schema '{schema_name}' in file '{json_file.name}' is already defined in '{schema_files[schema_name]}'")
+                schema_files[schema_name] = json_file.name
 
+                # every file is processed on each run, so the includes are recorded for
+                # schemas already listed in a manifest as well as for new ones
                 if "include" in json_data["schemas"][schema_name]:
                     for include in json_data["schemas"][schema_name]["include"]:
                         unverified_includes[include].append(json_file.name)
-                        file_includes.append(include)
+                        if include not in file_includes:
+                            file_includes.append(include)
              
         if "mappings" in json_data:
             for mapping in json_data["mappings"]:
@@ -86,11 +94,18 @@ def update_manifest():
             raise ManifestError(f"Included schema '{include}' referenced by files {refernced_by} not found in manifest")
     
 
-    remaining_entries = dict(new_manifest_entries)
-    current_manifest_schemas = dict(last_manifest_schemas)
+    # entries already listed in a manifest are updated in place, only new entries are
+    # appended to the last manifest (starting another one when it is full)
+    remaining_entries = {}
+    for entry_name, entry in new_manifest_entries.items():
+        if entry_name in entry_manifest_file:
+            manifest_schemas_by_file[entry_manifest_file[entry_name]][entry_name] = entry
+        else:
+            remaining_entries[entry_name] = entry
+
     current_manifest_filename = last_manifest_filename
-    created_manifests = []
     while remaining_entries:
+        current_manifest_schemas = manifest_schemas_by_file[current_manifest_filename]
         space_available = MAX_MANIFEST_SCHEMAS - len(current_manifest_schemas)
         
         if space_available > 0:
@@ -98,25 +113,21 @@ def update_manifest():
             remaining_entries = dict(islice(remaining_entries.items(), space_available, None))
             current_manifest_schemas.update(entries_to_add)
 
-            with open(manifest_path / current_manifest_filename, 'w', encoding='utf-8') as f:
-                manifest_data = {
-                    "schemas": current_manifest_schemas,
-                    "next": None
-                }
-                json.dump(manifest_data, f, indent=4)
-        
         if remaining_entries:
             index += 1
             new_manifest_filename = f"manifest.{index}.json" if index else "manifest.json"
-            created_manifests.append(new_manifest_filename)
-            with open(manifest_path / current_manifest_filename, 'r', encoding='utf-8') as f:
-                prev_manifest = json.load(f)
-            prev_manifest["next"] = new_manifest_filename
-            with open(manifest_path / current_manifest_filename, 'w', encoding='utf-8') as f:
-                json.dump(prev_manifest, f, indent=4)
-
+            manifest_schemas_by_file[new_manifest_filename] = {}
             current_manifest_filename = new_manifest_filename
-            current_manifest_schemas = {}
+
+    manifest_filenames = list(manifest_schemas_by_file.keys())
+    for position, filename in enumerate(manifest_filenames):
+        next_filename = manifest_filenames[position + 1] if position + 1 < len(manifest_filenames) else None
+        with open(manifest_path / filename, 'w', encoding='utf-8') as f:
+            manifest_data = {
+                "schemas": manifest_schemas_by_file[filename],
+                "next": next_filename
+            }
+            json.dump(manifest_data, f, indent=4)
 
     index_path = manifest_path / "index.json"
     if index_path.exists():
@@ -130,7 +141,7 @@ def update_manifest():
 
     existing_manifests = index_data.get("manifests", [])
 
-    for manifest_file in created_manifests:
+    for manifest_file in manifest_filenames:
         if manifest_file not in existing_manifests:
             existing_manifests.append(manifest_file)
     
