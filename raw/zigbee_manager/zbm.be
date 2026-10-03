@@ -825,6 +825,29 @@ class ZbmSchemaRegistry : ZbmNotify
 
     end
 
+    # adds the schemas and mappings in schema_json, unlike add_schema a schema that is
+    # already in the registry is replaced as a whole, so anything removed from it goes too
+    def replace_schemas(schema_json)
+
+        self.validate_schema(schema_json)
+
+        var replaced = schema_json.find("schemas",{})
+        var kept = {}
+        for schema_name : self.registry["schemas"].keys()
+            if !replaced.contains(schema_name)
+                kept[schema_name] = self.registry["schemas"][schema_name]
+            end
+        end
+
+        var processed_schema = ZbmSchemaProcessor.process_schemas(
+            [{"version":self.registry["version"],"mappings":self.registry["mappings"],"schemas":kept},schema_json],
+            ZbmSchemaProcessorInfo.schema_layout,
+            true,
+            false)
+
+        self.set_registry(processed_schema)
+    end
+
     def remove_schema(schema_name)
         if !self.registry["schemas"].contains(schema_name)
             return false
@@ -2172,9 +2195,10 @@ class ZbmSchemaPuller
     # from the repository. each step runs from its own timer and makes at most one
     # request, so no single call gets near the time berry code is allowed to run for
     # (USE_BERRY_TIMEOUT, 4s by default) and tasmota keeps servicing mqtt, the web ui
-    # and zigbee while the files download. the files are validated as they arrive but
-    # only merged into the registry once all of them have been fetched, so a pull that
-    # fails leaves the registry as it was.
+    # and zigbee while the files download. the schemas are always downloaded, even when
+    # already in the registry, as the repository may have newer versions. each file
+    # replaces the schemas it defines as soon as it has been downloaded, then the added
+    # devices using them are configured again so the changes take effect.
 
     static var url_base = "https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
     static var timer_id = "zbm_pull_schemas"
@@ -2187,8 +2211,9 @@ class ZbmSchemaPuller
     var manifests
     var pending
     var requested
-    var schema_jsons
+    var found
     var downloaded
+    var reconfigure
     var step
     var attempts
     var running
@@ -2204,8 +2229,9 @@ class ZbmSchemaPuller
         self.manifests = []
         self.pending = []
         self.requested = {}
-        self.schema_jsons = []
+        self.found = []
         self.downloaded = []
+        self.reconfigure = []
         self.attempts = 0
         self.running = false
     end
@@ -2324,6 +2350,7 @@ class ZbmSchemaPuller
                 var key_index = self.keys.find(mapping)
                 if key_index != nil
                     self.keys.remove(key_index)
+                    self.found.push(mapping)
                     self.log.info(f"found schema {schema_name} for {mapping}")
                     self.request(schema_name)
                 end
@@ -2332,31 +2359,48 @@ class ZbmSchemaPuller
         self.next(/-> self.search_manifest())
     end
 
-    # downloads one schema file per step, queueing the schemas it includes
+    # downloads one schema file per step and replaces the schemas it defines in the
+    # registry, queueing the schemas it includes
     def download_schema()
+        if !size(self.pending)
+            for device_info : zbm_service.device_infos.iter()
+                if (device_info.status & ZbmDeviceStatus.Added) && self.found.find(device_info.key) != nil
+                    self.reconfigure.push(device_info)
+                end
+            end
+            self.next(/-> self.reconfigure_device())
+            return
+        end
+
         var schema_name = self.pending[0]
         var schema_json = self.fetch(f"{schema_name}.json")
-        zbm_schema_registry.validate_schema(schema_json)
-        self.pending.remove(0)
-        self.schema_jsons.push(schema_json)
-        self.downloaded.push(schema_name)
+        zbm_schema_registry.replace_schemas(schema_json)
+        self.log.info(f"replaced schema {schema_name}")
 
+        self.pending.remove(0)
+        self.downloaded.push(schema_name)
         for schema : schema_json.find("schemas",{})
             for include_name : schema.find("include",[])
                 self.request(include_name)
             end
         end
-
-        if size(self.pending)
-            self.next(/-> self.download_schema())
-        else
-            self.next(/-> self.commit())
-        end
+        self.next(/-> self.download_schema())
     end
 
-    def commit()
-        zbm_schema_registry.add_schemas(self.schema_jsons)
-        self.finish()
+    # configures one added device per step with its replaced schema, so new or
+    # removed entities show up over mqtt without restarting
+    def reconfigure_device()
+        if !size(self.reconfigure)
+            self.finish()
+            return
+        end
+        var device_info = self.reconfigure[0]
+        self.reconfigure.remove(0)
+        if zbm_service.has_device(device_info.shortaddr) && (device_info.status & ZbmDeviceStatus.Added)
+            self.log.info(f"configuring {device_info.name} with the updated schema")
+            zbm_service.configure_device(device_info)
+        end
+        self.next(/-> self.reconfigure_device())
     end
 
     def finish(error)
@@ -2370,8 +2414,9 @@ class ZbmSchemaPuller
             self.log.info(f"pulled schemas {self.downloaded}")
             result["Schemas"] = self.downloaded
         else
-            self.log.error(f"unable to pull schemas, registry left unchanged - {error}")
+            self.log.error(f"unable to pull schemas - {error}")
             result["Error"] = error
+            result["Schemas"] = self.downloaded
         end
         if size(self.keys)
             self.log.info(f"no schema found for {self.keys}")
@@ -2387,13 +2432,10 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
         return log_cmnd_error(cmnd_name,"a schema pull is already in progress")
     end
 
+    # every device is included, also those already added, as the schemas in the
+    # repository may have been updated since they were pulled
     var request_list = []
     for device_info : zbm_service.device_infos.iter()
-
-        if (device_info.status & ZbmDeviceStatus.Added) && 
-            !(device_info.status & (ZbmDeviceStatus.NoDefaultKey | ZbmDeviceStatus.SchemaNotFound | ZbmDeviceStatus.MappingNotFound))
-            continue
-        end
 
         if ["",nil].find(device_info.key) != nil && 
             (["",nil].find(device_info.manufacturer) != nil || 
@@ -2412,7 +2454,7 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
     end
 
     if !size(request_list)
-        log_cmnd_info(cmnd_name,"no devices without a schema")
+        log_cmnd_info(cmnd_name,"no devices with a key to pull schemas for")
         return tasmota.resp_cmnd_done()
     end
 
