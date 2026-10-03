@@ -259,6 +259,8 @@ All commands are either read only (ro), read write (rw) or, write only (wo). Une
 
 > ## ZbmPullSchemas
 > For all devices attached to the zigbee bridge, attempts to download valid schemas and mappings from the github repository for them based on the device key (or generated key if `auto_key_devices=true`). For devices that have schemas in the repository, assuming they are all named with `ZbName` already, with default settings this would be all that is required to make them discoverable (and in the case of home assistant they would show up as devices in the tasmota integration)
+>
+> The download runs in the background, one file at a time, so the command returns straight away with `{"ZbmPullSchemas":{"Status":"Started","Keys":[...]}}`. Schemas included by the downloaded schemas are downloaded with them, and failed requests are retried. Once finished the result is logged and published to `stat/<topic>/RESULT`, either `{"ZbmPullSchemas":{"Status":"Done","Schemas":[...],"NotFound":[...]}}` or `{"ZbmPullSchemas":{"Status":"Failed","Error":"..."}}`. The registry is only updated once every file has been downloaded, so a failed pull leaves it unchanged.
 
 
 ## To do/Notes
