@@ -1240,8 +1240,8 @@ class ZbmState : ZbmNotify
         end 
 
     def reset()
-        for key : ZbmState.config_defaults
-            zbm_state.info[key] = ZbmState.config_defaults[key]
+        for key : self.config_defaults.keys()
+            self.setmember(key,self.config_defaults[key])
         end
         persist.zbm_state  = nil
         persist.save(true)
@@ -2111,9 +2111,9 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
         end
         if ttype == "bool"
             if type(argv) == "string"
-                if re.match("^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|1)$",argv)
+                if re.match("^([Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]|1)$",argv)
                     return true
-                elif re.match("^([Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|1)$",argv)
+                elif re.match("^([Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]|0)$",argv)
                     return false
                 end
             end
