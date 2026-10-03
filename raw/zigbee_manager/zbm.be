@@ -2469,7 +2469,7 @@ class ZbmWebUI
     # a "Zigbee Manager" page, opened from a button on the main page, showing the
     # devices known to the manager with buttons to add, reset, remove and rename them
 
-    static var url = "/zbm"
+    static var url = "/zbman"     # not /zbm, that is the url of tasmota's own Zigbee Map page
     static var problem_flags = ZbmDeviceStatus.Unnamed | ZbmDeviceStatus.MappingNotFound | ZbmDeviceStatus.SchemaNotFound |
                                ZbmDeviceStatus.SchemaCompileFailed | ZbmDeviceStatus.NotFound | ZbmDeviceStatus.NoDefaultKey
     static var style = "<style>"
@@ -2531,7 +2531,7 @@ class ZbmWebUI
 
     def web_add_main_button()
         import webserver
-        webserver.content_send("<p></p><form id=but_zbm style='display:block;' action='zbm' method='get'><button>Zigbee Manager</button></form>")
+        webserver.content_send("<p></p><form id=but_zbman style='display:block;' action='zbman' method='get'><button>Zigbee Manager</button></form>")
     end
 
     static def text(value)
@@ -2610,7 +2610,7 @@ class ZbmWebUI
         if zbm_schema_puller != nil
             pull_button = "<button type='button' disabled>Pulling schemas...</button>"
         end
-        webserver.content_send("<form method='post' action='zbm' class='zt'><button name='act' value='poll'>Poll devices</button>" + pull_button + "</form><p></p>")
+        webserver.content_send("<form method='post' action='zbman' class='zt'><button name='act' value='poll'>Poll devices</button>" + pull_button + "</form><p></p>")
 
         var devices = self.sorted_devices()
         webserver.content_send(f"<fieldset><legend><b>&nbsp;Devices ({size(devices)})&nbsp;</b></legend>")
@@ -2682,7 +2682,7 @@ class ZbmWebUI
         end
 
         var rename_label = named ? "Rename" : "Set name"
-        webserver.content_send(f"<form method='post' action='zbm'><input type='hidden' name='dev' value='{deviceid}'>")
+        webserver.content_send(f"<form method='post' action='zbman'><input type='hidden' name='dev' value='{deviceid}'>")
         webserver.content_send(f"<div class='zr'><input name='name' value='{name}' maxlength='32' placeholder='Device name'><button class='zb' name='act' value='rename'>{rename_label}</button></div>")
         webserver.content_send("<div class='zr'>")
         if named && !(status & (ZbmDeviceStatus.Added | ZbmDeviceStatus.Removed))
