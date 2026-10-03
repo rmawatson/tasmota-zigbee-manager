@@ -461,7 +461,7 @@ class ZbmSchemaProcessorInfo
     static var schema_category_layout = {
         ZbmSchemaItem("catageory", _class.value_in(_class.categories), _class.OPTIONAL): {
             ZbmSchemaItem("element_name", _class.valid_name("element_name"), _class.OPTIONAL): {
-                ZbmSchemaItem("functions", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
+                ZbmSchemaItem(f"one of {_join(_class.fn_components, ', ')}", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
                 ZbmSchemaItem("others", _class.value_in(["format_category"]), _class.OPTIONAL): ZbmSchemaItem("function_item",_class.valid_name( "name")),
             }
         },
@@ -618,7 +618,7 @@ class ZbmSchemaProcessor
             end
 
             if size(required_keys) > 0
-                var missing = _join(required_keys, ', ', / v -> str(v.value))
+                var missing = _join(required_keys, ', ', / v -> v.debug_name)
                 raise "validation_error", f"missing required keys '{missing}' at level {level}"
             end
             result = storage
@@ -2500,14 +2500,18 @@ class ZbmWebUI
         ".zb{flex:1;width:auto;line-height:1.8rem;font-size:0.9rem;padding:0 8px;}"
         ".zr input+.zb,.zr select+.zb,.zk+.zb{flex:none;}"
         ".zm{border-radius:0.3em;margin:5px 0;color:var(--c_btntxt);text-align:center;}"
+        ".za{width:100%;height:160px;box-sizing:border-box;font-family:monospace;font-size:0.8em;}"
         ".zt{display:flex;gap:5px;padding:0;}"
         ".zt button{flex:1;width:auto;}"
         ".zt .zc{background:var(--c_btnoff);}"
         "button:disabled{opacity:0.5;cursor:default;}"
         "</style>"
 
+    static var max_schema_size = 16384
+
     var routes_added
     var message
+    var draft     # a schema that was rejected, shown again so it can be corrected
 
     def init()
         import webserver
@@ -2776,6 +2780,14 @@ class ZbmWebUI
         end
         webserver.content_send("</fieldset><p></p>")
 
+        var draft = self.draft != nil ? webserver.html_escape(self.draft) : ""
+        self.draft = nil
+        webserver.content_send("<fieldset><legend><b>&nbsp;Upload a schema&nbsp;</b></legend><form method='post' action='zbman'>")
+        webserver.content_send("<p class='zn'>Paste a schema, or load one from a file. It is checked before it is added, and replaces a schema with the same name.</p>")
+        webserver.content_send("<p><input type='file' accept='.json,application/json' onchange='var r=new FileReader();r.onload=function(){eb(\"zbs\").value=r.result};r.readAsText(this.files[0])'></p>")
+        webserver.content_send("<textarea id='zbs' name='schema_json' class='za' spellcheck='false' placeholder='{\"version\":1,\"mappings\":{...},\"schemas\":{...}}'>" + draft + "</textarea>")
+        webserver.content_send("<button class='bgrn' name='act' value='add_schema'>Upload schema</button></form></fieldset><p></p>")
+
         var keys = self.sorted(mappings.keys(),/ key -> string.tolower(key))
         webserver.content_send(f"<fieldset><legend><b>&nbsp;Mappings ({size(keys)})&nbsp;</b></legend>")
         for key : keys
@@ -2840,7 +2852,7 @@ class ZbmWebUI
         var action = webserver.arg("act")
         var page = ""
         try
-            if ["remove_schema","reset_schemas","add_mapping","remove_mapping"].find(action) != nil
+            if ["add_schema","remove_schema","reset_schemas","add_mapping","remove_mapping"].find(action) != nil
                 page = "schemas"
                 self.message = self.run_schema_action(action)
             elif ["save_settings","reset_settings"].find(action) != nil
@@ -2966,9 +2978,75 @@ class ZbmWebUI
         return ["Unable to start pulling schemas, see the console",false]
     end
 
+    # returns why schema_json can not be added to the registry, or nil
+    def check_schema(schema_json)
+        try
+            zbm_schema_registry.check_version(schema_json)
+            # the functions are compiled as well, so code that would not run is caught now
+            ZbmSchemaProcessor.process_schemas(schema_json,ZbmSchemaProcessorInfo.schema_layout,false,true)
+        except .. as e,m
+            return m != nil ? f"{e}: {m}" : str(e)
+        end
+
+        var schemas = schema_json.find("schemas",{})
+        var mappings = schema_json.find("mappings",{})
+        if !size(schemas) && !size(mappings)
+            return "it has no schemas or mappings"
+        end
+        var known = zbm_schema_registry.registry["schemas"]
+        for schema_name : schemas.keys()
+            for include_name : schemas[schema_name].find("include",[])
+                if !schemas.contains(include_name) && !known.contains(include_name)
+                    return f"{schema_name} includes {include_name}, which is not in the registry"
+                end
+            end
+        end
+        for key : mappings.keys()
+            if !schemas.contains(mappings[key]) && !known.contains(mappings[key])
+                return f"{key} is mapped to {mappings[key]}, which is not in the registry"
+            end
+        end
+        return nil
+    end
+
+    def upload_schema(text)
+        if !size(strip(text))
+            return ["Paste a schema to upload",false]
+        elif size(text) > self.max_schema_size
+            return [f"The schema is larger than {self.max_schema_size} bytes",false]
+        end
+
+        var schema_json = json.load(text)
+        var error = isinstance(schema_json,map) ? self.check_schema(schema_json) : "it is not valid JSON"
+        if error != nil
+            self.draft = text
+            return [f"Schema rejected, {error}",false]
+        end
+
+        zbm_schema_registry.replace_schemas(schema_json)
+
+        # added devices using the schemas are configured again so the changes take effect
+        var schema_names = to_list(schema_json.find("schemas",{}).keys())
+        for device_info : zbm_service.device_infos.iter()
+            if (device_info.status & ZbmDeviceStatus.Added) && device_info.key != nil &&
+                    schema_names.find(zbm_schema_registry.mapping(device_info.key)) != nil
+                zbm_service.configure_device(device_info)
+            end
+        end
+
+        var mapping_count = size(schema_json.find("mappings",{}))
+        var added = size(schema_names) ? _join(schema_names,", ") : ""
+        if mapping_count
+            added += (size(added) ? " and " : "") + f"{mapping_count} mapping(s)"
+        end
+        return [f"Uploaded {added}",true]
+    end
+
     def run_schema_action(action)
         import webserver
-        if action == "reset_schemas"
+        if action == "add_schema"
+            return self.upload_schema(webserver.arg("schema_json"))
+        elif action == "reset_schemas"
             zbm_schema_registry.reset()
             return ["Removed every schema and mapping",true]
         elif action == "remove_schema"
