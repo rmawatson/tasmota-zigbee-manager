@@ -109,7 +109,7 @@ In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, with `<n>
 The `reset_value` callback is called straight after `parse_value`. It is intended to allow a reset value to be emitted to the mqtt
 topic after the parsed value. In the case of a button, the default home assistant tasmota plugin didn't support the button field of the tasmota discovery message, and will show nothing in the UI.
 
-Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one zigbee message is recieved (in the case of the Sonoff snzb-01p and probably others) when the button is pressed. This message always has the same `Power:2` value when the button is pressed. Home assistant ignores this as 'no change' for a sensor, and no event is generated within HA. To work aroudn this `reset_value` can be used to send a 0 straight after the value from `parse_value` has been emitted, creating a pulse that can be used trigger automations.
+Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one zigbee message is received (in the case of the Sonoff snzb-01p and probably others) when the button is pressed. This message always has the same `Power:2` value when the button is pressed. Home assistant ignores this as 'no change' for a sensor, and no event is generated within HA. To work around this `reset_value` can be used to send a 0 straight after the value from `parse_value` has been emitted, creating a pulse that can be used to trigger automations.
 
 `format_category` is required for sensors to show up in home assistant without `format_category` the value for the sensor would be at the root of the json fragment sent to the `tele/<device_name>/SENSOR` topic. This is ignored by the home assistant plugin, apart from a few select sensor fields. With the fragment below both `Pressed` and `LinkQuality` would fail to show in the UI
 
@@ -120,7 +120,7 @@ Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one
   "LinkQuality": 147
 }
 ```
-setting `format_category` for the a sensor `Pressed` (see `schema/sonoff_snzb-01p.json`) to `"format_category": "Button"` in the schema will show up in the home assistant UI as a sensor `Button Pressed` as in the json below 
+setting `format_category` for the sensor `Pressed` (see `schema/sonoff_snzb-01p.json`) to `"format_category": "Button"` in the schema will show up in the home assistant UI as a sensor `Button Pressed` as in the json below 
 ```
 {
   "Time": "2025-11-25T20:10:09",
@@ -187,7 +187,7 @@ Assuming the device is connected to the zigbee bridge,
         }
     }
     ```
-- Add any includes from preexisting schemas that contain features your devices exposes, (everythign seems to have LinkQuality as part of the zigbee message)
+- Add any includes from pre-existing schemas that contain features your device exposes (everything seems to have LinkQuality as part of the zigbee message)
     ```
     {
         "version": 1,
@@ -204,16 +204,16 @@ Assuming the device is connected to the zigbee bridge,
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
 All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value from the `cmnd` topic for `set_value` (1 for `ON`, 0 for `OFF`), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
-- In this case, setting and reading the the `Power` field is all that is required<br>
+- In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
-`parse_value` should return the extracted value, foramtted as required<br/>
+`parse_value` should return the extracted value, formatted as required<br/>
 `"parse_value": "/device_info,attr_list -> attr_list['Power'] ? 'ON' : 'OFF'"`<br/>
-- For a sensor no futher callbacks are necessary - just a `format_category` in the case of HA. For a relay, `set_value` is needed to write a value from the cmnd topic's mqtt payload. It can use the provided `zb_write` helper function to write this to the relay device.
+- For a sensor no further callbacks are necessary - just a `format_category` in the case of HA. For a relay, `set_value` is needed to write a value from the cmnd topic's mqtt payload. It can use the provided `zb_write` helper function to write this to the relay device.
 `"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value ? 1 : 0})"`<br/>
-Note: it may require some experimentation in the console using tasmotas `ZbSend` to check your relay is working. the `zb_write` `zb_read` functions above are just wrappers around `ZbSend`
+Note: it may require some experimentation in the console using Tasmota's `ZbSend` to check your relay is working. the `zb_write` `zb_read` functions above are just wrappers around `ZbSend`
 - Optionally you can add `request_value` to have Zbm request the latest relay status on startup for this device.
-- Your schema should look look as below.
+- Your schema should look as below.
     ```
     {
         "version": 1,
@@ -260,7 +260,7 @@ Note: it may require some experimentation in the console using tasmotas `ZbSend`
     }
     ```
 - The schema can now be added to the registry by pasting it into **Upload a schema** on the [Schemas page](#schemas), which checks it and tells you what is wrong if it is rejected, or with `ZbmAddSchema <paste_the_json>`
-- Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manifest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbmPullSchemas` should be all that is required to setup your device.
+- Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manifest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbmPullSchemas` should be all that is required to set up your device.
 
 ## Schema functions
 
