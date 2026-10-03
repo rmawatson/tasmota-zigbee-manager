@@ -2036,7 +2036,7 @@ def zbm_remove_mapping(cmnd_name, idx, payload, payload_json)
     if !zbm_schema_registry.remove_mapping(key)
         return tasmota.resp_cmnd_error()
     end
-    tasmota.resp_cmnd({"ZbmRemovemapping":f"{key}"})
+    tasmota.resp_cmnd(json.dump({"ZbmRemoveMapping":key}))
 end
 
 
@@ -2808,7 +2808,7 @@ class ZbmExtension
         tasmota.add_cmd('ZbmRemoveDevice',zbm_remove_device)
         tasmota.add_cmd('ZbmResetDevice',zbm_reset_device)
         tasmota.add_cmd('ZbmAddMapping',zbm_add_mapping)
-        tasmota.add_cmd('ZbmRemovemapping',zbm_remove_mapping)
+        tasmota.add_cmd('ZbmRemoveMapping',zbm_remove_mapping)
         tasmota.add_cmd('ZbmPullSchemas',zbm_pull_schmeas)
 
         try
@@ -2852,7 +2852,7 @@ class ZbmExtension
         tasmota.remove_cmd('ZbmRemoveDevice')
         tasmota.remove_cmd('ZbmResetDevice')
         tasmota.remove_cmd('ZbmAddMapping')
-        tasmota.remove_cmd('ZbmRemovemapping')
+        tasmota.remove_cmd('ZbmRemoveMapping')
         tasmota.remove_cmd('ZbmPullSchemas')
         print("unloaded zbm")
     end
