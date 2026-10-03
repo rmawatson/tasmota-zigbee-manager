@@ -5,7 +5,13 @@ This extension is meant to implement the Tasmota discovery protocol when running
 
 This is an alternative to Zigbee2MQTT and others such that it keeps all the zigbee communication on device, and translates this to mqtt messages that match any other Tasmotized wifi devices. 
 
-To install this extension in Tasmota, paste the url `https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/extensions/` into the field at the bottom of `Tools->Extensions` and install from there.
+To install this extension in Tasmota, paste the url
+
+```
+https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/extensions/
+```
+
+into the field at the bottom of the Online Store in `Tools->Extension Manager`, press Enter, and install Zigbee Manager from the list.
 
 > [!NOTE]
 > After installing, turn on retained messages for sensors and states with `SensorRetain 1` and `StateRetain 1` in the Tasmota console. Many zigbee devices only report when something changes, and the extension cannot be asked for a device's current values, so without retained messages Home Assistant shows no value for a device after it restarts, until the device next reports. These are Tasmota's own settings, so they also apply to the bridge's own `SENSOR` and `STATE` messages.
@@ -90,6 +96,20 @@ Changes the values otherwise set with `ZbmConfig`. **Reset settings** puts them 
 | Name devices automatically | `auto_name_devices` | off | Name unnamed devices `manufacturer-model N` when they are added. Not recommended |
 | Key devices by manufacturer:model | `auto_key_devices` | on | Needed to use the schemas in this repository |
 | Log level | `log_level` | Info | None, Error, Info or Debug. Use Debug when looking into a problem |
+
+### Tasmota Style
+
+These pages, and the rest of the Tasmota web UI, can be restyled with [Tasmota Style](https://github.com/rmawatson/tasmota-style),
+a theme installed as another extension. Its colours are picked from presets in its own Tasmota Style Manager. To install it, paste the url
+
+```
+https://raw.githubusercontent.com/rmawatson/tasmota-style/refs/heads/main/extensions/
+```
+
+into the field at the bottom of the Online Store in `Tools->Extension Manager`, press Enter, and install Tasmota Style from the list.
+This is the Devices page with it:
+
+<img src="docs/images/devices-tasmota-style.png" alt="The Devices page with Tasmota Style" width="420">
 
 ## How it works
 
