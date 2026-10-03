@@ -2181,7 +2181,7 @@ def zbm_add_mapping(cmnd_name, idx, payload, payload_json)
         return tasmota.resp_cmnd_error()
     end
 
-    tasmota.resp_cmnd({"ZbmAddMapping":f"{key}:{schema_name}"})
+    tasmota.resp_cmnd(json.dump({"ZbmAddMapping":f"{key}:{schema_name}"}))
 end
 
 def zbm_remove_mapping(cmnd_name, idx, payload, payload_json)
@@ -2232,7 +2232,7 @@ def zbm_device(cmnd_name, idx, payload, payload_json)
     ZbmLogger("status").info(f"       battery: {device_info.battery}")
     ZbmLogger("status").info(f"           key: {device_info.key}")
     ZbmLogger("status").info(f"        status: {desc}")
-    return tasmota.resp_cmnd(status)
+    return tasmota.resp_cmnd(json.dump(status))
 end
 
 def zbm_devices(cmnd_name, idx, payload, payload_json)
@@ -2248,7 +2248,7 @@ def zbm_devices(cmnd_name, idx, payload, payload_json)
         var devicename = (device_info.name != "" && device_info.name != nil) ? device_info.name : "<unnamed>"
         ZbmLogger("status").info(f"[{devicename} (0x{device_info.shortaddr:.4X})] {desc}")
     end
-    tasmota.resp_cmnd(status)
+    tasmota.resp_cmnd(json.dump(status))
 end
 
 def zbm_config(cmmd_name,idx,payload,payload_json)
@@ -2259,7 +2259,7 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
             config["ZbmConfig"][config_key] = zbm_state.info[config_key] 
             log_cmnd_info(cmmd_name,f"{config_key} = {zbm_state.info[config_key]}")
         end
-        return tasmota.resp_cmnd(config)
+        return tasmota.resp_cmnd(json.dump(config))
     end
 
 

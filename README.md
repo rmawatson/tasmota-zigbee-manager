@@ -463,11 +463,11 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 
 > ### ZbmDevices (ro)
 >
-> Lists the devices on the bridge with their status, one per line, such as `[RELAY-01 (0x120E)] ['Added']`
+> Lists the devices on the bridge with their status, one per line, such as `[RELAY-01 (0x120E)] ['Added']`, and answers with them as JSON, `{"ZbmStatus":[{"devicename":"RELAY-01","deviceid":"0x120E","status":["Added"]},...]}`
 
 > ### ZbmDevice (ro)
 >
-> Shows the details of one device, by id or by name like `ZbmRemoveDevice`, `ZbmDevice 0x120E`, see [Creating a schema](#creating-a-schema)
+> Shows the details of one device, by id or by name like `ZbmRemoveDevice`, `ZbmDevice 0x120E`, see [Creating a schema](#creating-a-schema). It answers like `ZbmDevices`, with that device only
 
 > ### ZbmSchemas (ro)
 >
@@ -475,7 +475,7 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 
 > ### ZbmConfig (rw)
 >
-> Outputs the current config with no arguments, or sets the values given as key=value pairs or JSON, such as `ZbmConfig auto_add_devices=1,log_level=3`. On/off values can be given as `1`/`0`, `on`/`off`, `true`/`false` or `yes`/`no`. The same values can be changed on the [Settings page](#settings).
+> Outputs the current config with no arguments, `{"ZbmConfig":{"auto_poll_devices":true,"auto_poll_devices_period":5,...}}`, or sets the values given as key=value pairs or JSON, such as `ZbmConfig auto_add_devices=1,log_level=3`. On/off values can be given as `1`/`0`, `on`/`off`, `true`/`false` or `yes`/`no`. The same values can be changed on the [Settings page](#settings).
 >
 > `auto_poll_devices`<br/>
 > Enable/disable auto polling of devices. Every `auto_poll_devices_period` seconds the devices paired with the bridge are listed: new devices are found, devices that left are marked as not found (or removed, see `auto_remove_devices`), and with `auto_add_devices` the devices are added. `ZbmPollDevices` will run the same process manually a single time `default=true`
@@ -558,7 +558,7 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 
 > ### ZbmAddMapping (wo)
 >
-> Maps a device key to a schema, `ZbmAddMapping SONOFF:ZBMINIR2,mysonoff_r2`, `ZbmAddMapping key=SONOFF:ZBMINIR2,schema=mysonoff_r2` or `ZbmAddMapping {"key":"SONOFF:ZBMINIR2","schema":"mysonoff_r2"}`. A key can have letters, digits, spaces, `:`, `_` and `-`. The schema has to be in the registry, and a key that is already mapped has to be removed first (`ZbmAddSchema` replaces it instead)
+> Maps a device key to a schema, `ZbmAddMapping SONOFF:ZBMINIR2,mysonoff_r2`, `ZbmAddMapping key=SONOFF:ZBMINIR2,schema=mysonoff_r2` or `ZbmAddMapping {"key":"SONOFF:ZBMINIR2","schema":"mysonoff_r2"}`, and answers `{"ZbmAddMapping":"SONOFF:ZBMINIR2:mysonoff_r2"}`. A key can have letters, digits, spaces, `:`, `_` and `-`. The schema has to be in the registry, and a key that is already mapped has to be removed first (`ZbmAddSchema` replaces it instead)
 
 > ### ZbmRemoveMapping (wo)
 >
