@@ -267,7 +267,7 @@ All commands are either read only (ro), read write (rw) or, write only (wo). Une
 > ## ZbmAddMapping (wo)
 > Adds a mapping using key=value. This is the same the mappings added with ZbmAddSchema (and the same mapping could also be done this way)
 
-> ## ZbmRemovemapping (wo)
+> ## ZbmRemoveMapping (wo)
 > Removes a mapping by key name
 
 > ## ZbmPullSchemas
