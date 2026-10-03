@@ -65,6 +65,7 @@ Lists the schemas in the registry, each with the schemas it includes, its entiti
 - it is not valid JSON, or its `version` is not the registry's
 - it does not follow the schema layout, for example an unknown category, or an entity without any function
 - one of its functions does not compile
+- two of its relays have the same `index`
 - it includes a schema, or maps a key to a schema, that is neither in the registry nor in the same upload
 
 A rejected schema stays in the box so it can be corrected. The upload shown above is rejected with *Schema rejected, acme_door includes battery_pct, which is not in the registry*. An accepted schema replaces any schema with the same name as a whole, and added devices using it are configured again so the changes reach Home Assistant.
@@ -102,7 +103,7 @@ When a new zigbee message arrives, the device it came from is looked up. If it i
 
 The `SENSOR` and `STATE` messages hold the latest value of every entity that has had one since the extension started, not only the values from the last zigbee message.
 
-In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, with `<n>` counting from 1. A command received there is passed to the relay's `set_value` callback, with 1 for `ON` and 0 for `OFF`. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`).
+In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback, with 1 for `ON` and 0 for `OFF`. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`).
 
 `request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. For battery operated devices that are not actively listening this will end up doing nothing.
 
@@ -173,7 +174,7 @@ Assuming the device is connected to the zigbee bridge,
     ```
     The zigbee packet is the second item `{"Power":1,"Endpoint":1,"LinkQuality":149}`
 
-- Create the `relay` or `sensor` in your schema. The name for the schema is up to you. The categories are `relays` (published to `stat/<device_name>/POWERn`), `sensors` and `switches` (`tele/<device_name>/SENSOR`) and `states` (`tele/<device_name>/STATE`). Switches do not show anything in home assistant, but the mqtt messages for them work. `commands` is accepted but not implemented yet (see [To do/Notes](#to-donotes)), and any other category, such as `buttons`, is rejected. A button is made with a sensor, see [How it works](#how-it-works). the name of the relay can be whatever you want. Relays are `POWER1` ,`POWER2`, `POWER3`.. in the mqtt messages (but see [To do/Notes](#to-donotes) for devices with more than one relay).
+- Create the `relay` or `sensor` in your schema. The name for the schema is up to you. The categories are `relays` (published to `stat/<device_name>/POWERn`), `sensors` and `switches` (`tele/<device_name>/SENSOR`) and `states` (`tele/<device_name>/STATE`). Switches do not show anything in home assistant, but the mqtt messages for them work. `commands` is accepted but not implemented yet (see [To do/Notes](#to-donotes)), and any other category, such as `buttons`, is rejected. A button is made with a sensor, see [How it works](#how-it-works). the name of the relay can be whatever you want. Relays are `POWER1`, `POWER2`, `POWER3`.. in the mqtt messages, numbered in the order of their names unless they have an `index` (see [Schema functions](#schema-functions)).
     ```
     {
         "version": 1,
@@ -270,7 +271,9 @@ A schema can have these keys
 - `include`, a list of schemas whose entities are added to this one, such as `["link_quality", "battery_percentage"]`
 - `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1
 
-Each entity has one or more of the functions below, and a sensor can have a `format_category`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
+Each entity has one or more of the functions below, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
+
+A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<device_name>/POWER<n>` topics, is its `index`, a whole number from 1 to 32. Relays without an `index` take the free numbers in the order of their names, so `Relay1` and `Relay2` are 1 and 2. Two relays with the same `index` are a mistake, **Upload a schema** rejects them, and a device using them gets the status *Schema compile failed* when it is added.
 
 ### The functions
 
@@ -286,7 +289,7 @@ A relay must have `set_value`, otherwise the device is marked *Schema compile fa
 
 - `device_info` is the device, with `device_info.name`, `device_info.deviceid` (`0x120E`), `device_info.shortaddr` (as a number), `device_info.manufacturer`, `device_info.model`, `device_info.key`, `device_info.lqi` and `device_info.battery`.
 - `attr_list` is a map of the attributes in the zigbee message, as shown in the `attributes_final` debug line, such as `{"Power":1,"Endpoint":1,"LinkQuality":149}`. Read it with `attr_list.contains('Power')`, `attr_list['Power']`, or `attr_list.find('Power')`, which gives `nil` rather than an error when the attribute is missing.
-- `ctx` has two helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
+- `ctx` has two helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. Both take an endpoint as an optional third argument, `ctx.zb_write(device_info, {'Power':1}, 2)` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":1}}`. Without one, Tasmota sends to the device's first endpoint. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
 
 ### Writing a function
 
@@ -392,6 +395,26 @@ A button press as a pulse, from `schema/sonoff_snzb-01p.json`. `{"Power":2}` set
 }
 ```
 
+Two relays, one per endpoint, as on a two gang switch. Each relay reads the messages from its own endpoint, and writes to it. Without the `index`, Top would be number 2, as Bottom comes first by name. `{"Power":1,"Endpoint":2}` publishes `ON` to `stat/<device_name>/POWER2`, and `cmnd/<device_name>/Power2 OFF` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":0}}`
+```json
+"relays": {
+    "Top": {
+        "index": 1,
+        "has_value": "/device_info,attr_list -> attr_list.find('Endpoint') == 1 && attr_list.contains('Power')",
+        "parse_value": "/device_info,attr_list -> attr_list['Power']",
+        "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info, {'Power': value}, 1)",
+        "request_value": "/device_info,ctx -> ctx.zb_read(device_info, {'Power': true}, 1)"
+    },
+    "Bottom": {
+        "index": 2,
+        "has_value": "/device_info,attr_list -> attr_list.find('Endpoint') == 2 && attr_list.contains('Power')",
+        "parse_value": "/device_info,attr_list -> attr_list['Power']",
+        "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info, {'Power': value}, 2)",
+        "request_value": "/device_info,ctx -> ctx.zb_read(device_info, {'Power': true}, 2)"
+    }
+}
+```
+
 Logging every message from the device, on several lines. It publishes nothing, as `has_value` always returns false
 ```json
 "states": {
@@ -474,7 +497,7 @@ A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x1
 >
 > Adding a schema that is already in the registry merges it with the stored one: the entities and functions in the new one replace the stored ones, those only in the stored one are kept, and an `include` list is replaced as a whole. A mapping that is already in the registry is replaced.
 >
-> The layout of the schema is checked, but its functions are not compiled and its includes are not looked up, so a mistake in them shows up as *Schema compile failed* when a device using the schema is added. **Upload a schema** on the [Schemas page](#schemas) checks both before anything is stored, and replaces a stored schema as a whole.
+> The layout of the schema is checked, but its functions are not compiled, its includes are not looked up and the indexes of its relays are not compared, so a mistake in them shows up as *Schema compile failed* when a device using the schema is added. **Upload a schema** on the [Schemas page](#schemas) checks all of these before anything is stored, and replaces a stored schema as a whole.
 
 > ### ZbmResetSchemas (wo)
 >
@@ -520,7 +543,5 @@ A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x1
 
 ## To do/Notes
 Entities in `commands` (see `schema/sonoff_minir2.json`) are accepted, and their `request_value` is called, but their values are not published and nothing is subscribed to for their `set_value`. Home Assistant doesn't really have a no code/yaml way to call them, but it would still be nice to listen to the topics to configure things such as TurboMode on the sonoff_minir2.
-
-Devices with more than one relay do not work properly yet. The `Power<n>` numbers are not given in the order the relays are written in the schema, and a state change of one relay can be published under another relay's number. Devices with a single relay are not affected.
 
 the zha repository contains a lot of already found information on devices, for example the minir2, the TurboMode feature's details are described `https://github.com/zigpy/zha-device-handlers/blob/dev/zhaquirks/sonoff/zbminir2.py`
