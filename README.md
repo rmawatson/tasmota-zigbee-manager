@@ -32,9 +32,9 @@ If the repository has no schema for the device, see [Creating a schema](#creatin
 
 Every device found on the bridge is listed, named devices first. Each shows its short address, manufacturer, model, key (`manufacturer:model`), the schema mapped to that key, link quality, battery level (`-` for mains powered devices) and when the bridge last heard from it, with its status in the top right.
 
-- **Rename** (or **Set name** for an unnamed device) names the device with `ZbName`. Renaming a device that is already added adds it again, so its MQTT topics move to the new name.
+- **Rename** (or **Set name** for an unnamed device) names the device with `ZbName`. When an added device is renamed, here or with `ZbName` in the console (noticed at the next poll), its MQTT topics move to the new name and it is reported Offline under the old one.
 - **Add** (`ZbmAddDevice`) is shown for every device that is not added. A name typed into the box is set first, so an unnamed device can be named and added in one go. Add also clears the errors left by an earlier attempt, so it can be pressed again once a missing schema has been added.
-- **Reset** (`ZbmResetDevice`) clears the device's status. **Remove** (`ZbmRemoveDevice`) removes it, after asking.
+- **Reset** (`ZbmResetDevice`) clears the device's status. **Remove** (`ZbmRemoveDevice`) removes it, after asking. After either, its messages are no longer processed and its relays no longer take commands, until it is added again.
 - **Poll devices** (`ZbmPollDevices`) looks for devices joining or leaving the bridge now.
 - **Pull schemas** (`ZbmPullSchemas`) downloads the schemas for every device from this repository, including devices that are already added, as their schemas may have been updated. The button shows *Pulling schemas...* until it has finished.
 
@@ -101,9 +101,9 @@ When a new zigbee message arrives, the device it came from is looked up. If it i
 | `sensors` | `tele/<device_name>/SENSOR`, under the entity's `format_category` when it has one | As returned |
 | `states` | `tele/<device_name>/STATE` | As returned |
 
-The `SENSOR` and `STATE` messages hold the latest value of every entity that has had one since the extension started, not only the values from the last zigbee message.
+The `SENSOR` and `STATE` messages hold the latest value of every entity that has had one since the extension started, not only the values from the last zigbee message. They are retained when Tasmota's `SensorRetain` (for `SENSOR`) or `StateRetain` (for `STATE`) is on, so turn these on if Home Assistant should show the last values straight after it restarts.
 
-In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback, with 1 for `ON` and 0 for `OFF`. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`).
+In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`).
 
 `request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. For battery operated devices that are not actively listening this will end up doing nothing.
 
@@ -204,7 +204,7 @@ Assuming the device is connected to the zigbee bridge,
     }
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
-All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value from the `cmnd` topic for `set_value` (1 for `ON`, 0 for `OFF`), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
+All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value from the `cmnd` topic for `set_value` (1 for `ON`, 0 for `OFF`, see [How it works](#how-it-works) for `TOGGLE`), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
 - In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
@@ -282,7 +282,7 @@ A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<devi
 | `has_value` | For every message from the device | `device_info, attr_list, ctx` | Whether the message has a value for this entity. Without `has_value`, `parse_value` is called for every message |
 | `parse_value` | When `has_value` returned true | `device_info, attr_list, ctx` | The value to publish, `nil` is published as `null` |
 | `reset_value` | Straight after `parse_value` | `device_info, attr_list, ctx` | A second value, published straight after the first |
-| `set_value` | Relays only, when a command arrives on `cmnd/<device_name>/Power<n>` | `device_info, value, ctx` | Nothing. `value` is 1 for `ON` and 0 for `OFF` |
+| `set_value` | Relays only, when a command arrives on `cmnd/<device_name>/Power<n>` | `device_info, value, ctx` | Nothing. `value` is 1 for `ON` and 0 for `OFF`, and for `TOGGLE` the opposite of the relay's last state |
 | `request_value` | When the device is configured, see [How it works](#how-it-works) | `device_info, ctx` | Nothing |
 
 A relay must have `set_value`, otherwise the device is marked *Schema compile failed* when its first message arrives.
@@ -429,10 +429,10 @@ Logging every message from the device, on several lines. It publishes nothing, a
 All commands are either read only (ro), read write (rw) or write only (wo). Unless otherwise specified, arguments can be passed
 
 - positionally, `ZbmAddMapping SONOFF:ZBMINIR2,mysonoff_r2`
-- as key=value pairs, `ZbmAddDevice devicename=RELAY-01`. Keys and values can only contain letters, digits and `_ - . ( )`, so a name with a space, or a key with a `:`, has to be passed one of the other ways
+- as key=value pairs, `ZbmAddDevice devicename=RELAY-01`. A value can contain anything but `,` and `=`, such as `ZbmAddDevice devicename=Coffee Machine`
 - as JSON, `ZbmAddDevice {"devicename":"Coffee Machine"}`. It has to be valid JSON, with double quotes, otherwise it is read as a positional argument
 
-A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x120E`.
+A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x120E`, or in decimal, `4622`.
 
 > ### ZbmDevices (ro)
 >
@@ -440,7 +440,7 @@ A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x1
 
 > ### ZbmDevice (ro)
 >
-> Shows the details of one device, `ZbmDevice 0x120E`, see [Creating a schema](#creating-a-schema). The id has to be written exactly as `ZbmDevices` shows it, with upper case letters
+> Shows the details of one device, by id or by name like `ZbmRemoveDevice`, `ZbmDevice 0x120E`, see [Creating a schema](#creating-a-schema)
 
 > ### ZbmSchemas (ro)
 >
@@ -454,10 +454,10 @@ A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x1
 > Enable/disable auto polling of devices. Every `auto_poll_devices_period` seconds the devices paired with the bridge are listed: new devices are found, devices that left are marked as not found (or removed, see `auto_remove_devices`), and with `auto_add_devices` the devices are added. `ZbmPollDevices` will run the same process manually a single time `default=true`
 >
 > `auto_poll_devices_period`<br/>
-> Polling period for auto_poll_devices in seconds `default=5`
+> Polling period for auto_poll_devices in seconds, from 1 to 3600 `default=5`
 >
 > `auto_add_devices`<br/>
-> Enable/disable automatically attempting to add a device, at every poll and with every message from it. Until a device is added, no zigbee messages will be processed for that device, and no mqtt messages will be sent. To automatically add a device, it must have a valid name, a key (`auto_key_devices=true`), and a mapping in the registry for its key, to a schema that compiles. `default=false`
+> Enable/disable automatically attempting to add a device, at every poll and with every message from it. Until a device is added, no zigbee messages will be processed for that device, and no mqtt messages will be sent. To automatically add a device, it must have a valid name, a key (`auto_key_devices=true`, or one given with `ZbmAddDevice devicekey=`), and a mapping in the registry for its key, to a schema that compiles. `default=false`
 >
 > `auto_remove_devices`<br/>
 > Enable/disable removal of devices that are no longer paired with the bridge. At the next poll they are dropped from the list, and if they were added they are reported Offline first. With this off they stay listed with the status *Device not found*. `default=true`
@@ -466,7 +466,7 @@ A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x1
 > Enable/disable automatically naming a device (not recommended). This generates a name of the form `manufacturer-model N`. The name is set when adding the device is tried, and the device is added at the next try, such as a second `ZbmAddDevice` `default=false`
 >
 > `auto_key_devices`<br/>
-> Enable/disable generating the key used to look up the device's schema, of the form `manufacturer:model`. There is currently no way to set a key yourself, so with this off devices cannot be added. `default=true`
+> Enable/disable generating the key used to look up the device's schema, of the form `manufacturer:model`. A key of your own can be given with `ZbmAddDevice devicekey=<key>`, for example to map two identical devices to different schemas. With this off, every device needs one. `default=true`
 >
 > `log_level`<br/>
 > The log level of the zbm extension, 0 none, 1 error, 2 info or 3 debug. Use 3 when debugging any issue, errors in schema functions are only logged at 3 `default=2`
@@ -517,19 +517,21 @@ A device id is the device's short address in hex, as `ZbmDevices` shows it, `0x1
 
 > ### ZbmAddDevice (wo)
 >
-> Attempts to add a device, by id or by name, `ZbmAddDevice 0x120E`, `ZbmAddDevice devicename=RELAY-01` or `ZbmAddDevice {"devicename":"Coffee Machine"}`. Once a device is added, the zigbee payloads for that device will be processed, and an mqtt discovery topic will be emitted. 'Added' is the working state of a device. Any additional states (as seen using ZbmDevices) is most likely an error. To successfully add a device it needs to have a valid name (or auto_name_devices=true), a key (auto_key_devices=true), and the registry must have a mapping for the device's key, to a schema that compiles. A removed device has to be reset with `ZbmResetDevice` first
+> Attempts to add a device, by id or by name, `ZbmAddDevice 0x120E`, `ZbmAddDevice devicename=RELAY-01` or `ZbmAddDevice {"devicename":"Coffee Machine"}`. Once a device is added, the zigbee payloads for that device will be processed, and an mqtt discovery topic will be emitted. 'Added' is the working state of a device. Any additional states (as seen using ZbmDevices) is most likely an error. To successfully add a device it needs to have a valid name (or auto_name_devices=true), a key (auto_key_devices=true, or `devicekey`), and the registry must have a mapping for the device's key, to a schema that compiles. A removed device has to be reset with `ZbmResetDevice` first.
+>
+> A key other than `manufacturer:model` can be given with `devicekey`, `ZbmAddDevice deviceid=0x120E,devicekey=my:relay`. The key of a device that is already added can only be changed after `ZbmResetDevice`
 
 > ### ZbmRemoveDevice (wo)
 >
-> Removes the device either by `devicename=the_device_name` or `deviceid=the_device_shortaddr`. Its messages are no longer processed, it is reported Offline if it was added, and it stays listed as *Device was removed* until it is reset with `ZbmResetDevice`
+> Removes the device either by `devicename=the_device_name` or `deviceid=the_device_shortaddr`. Its messages are no longer processed, its relays no longer take commands, it is reported Offline if it was added, and it stays listed as *Device was removed* until it is reset with `ZbmResetDevice`
 
 > ### ZbmResetDevice (wo)
 >
-> Clears the status of a device, by id or by name like `ZbmRemoveDevice`. This includes *Added*, so an added device is no longer processed until it is added again. It is needed before a removed device can be added again. The schema errors, *No mapping found*, *Schema not found* and *Schema compile failed*, clear by themselves when a schema or mapping is added or removed, so after fixing a schema the device only needs adding again
+> Clears the status of a device, by id or by name like `ZbmRemoveDevice`, or of every device with `ZbmResetDevice all`. This includes *Added*, so an added device is no longer processed, and its relays take no commands, until it is added again. It is needed before a removed device can be added again. The schema errors, *No mapping found*, *Schema not found* and *Schema compile failed*, clear by themselves when a schema or mapping is added or removed, so after fixing a schema the device only needs adding again
 
 > ### ZbmAddMapping (wo)
 >
-> Maps a device key to a schema, `ZbmAddMapping SONOFF:ZBMINIR2,mysonoff_r2` or `ZbmAddMapping {"key":"SONOFF:ZBMINIR2","schema":"mysonoff_r2"}`. The key contains a `:`, so it cannot be passed as a key=value pair. The schema has to be in the registry, and a key that is already mapped has to be removed first (`ZbmAddSchema` replaces it instead)
+> Maps a device key to a schema, `ZbmAddMapping SONOFF:ZBMINIR2,mysonoff_r2`, `ZbmAddMapping key=SONOFF:ZBMINIR2,schema=mysonoff_r2` or `ZbmAddMapping {"key":"SONOFF:ZBMINIR2","schema":"mysonoff_r2"}`. A key can have letters, digits, spaces, `:`, `_` and `-`. The schema has to be in the registry, and a key that is already mapped has to be removed first (`ZbmAddSchema` replaces it instead)
 
 > ### ZbmRemoveMapping (wo)
 >
