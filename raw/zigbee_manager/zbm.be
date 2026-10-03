@@ -15,6 +15,7 @@ var zbm_state = nil
 var zbm_mqtt_bridge = nil
 var zbm_schema_registry = nil
 var zbm_service = nil
+var zbm_schema_puller = nil
 
 def _join(li, sep, fn)
     var result = ""
@@ -534,6 +535,9 @@ class ZbmSchemaProcessor
                 elif isinstance(schema_el[0],map)
                     next_storage =  {}
                 end
+                # a list is merged as a single value, the payload processed last replaces
+                # it. appending would repeat every entry each time a schema is re-added
+                storage.clear()
             end
 
             for pl_val : payload_el
@@ -687,7 +691,24 @@ class ZbmSchemaRegistry : ZbmNotify
     def load_registry()
         if persist.has("zbm_registry") && persist.zbm_registry != nil
             self.registry = _copy(persist.zbm_registry,true)
+            self.remove_duplicate_includes()
             self.log.debug("loaded persisted registry")
+        end
+    end
+
+    # registries saved by earlier versions can list the same include several times,
+    # as every merge appended the include list to the one already stored
+    def remove_duplicate_includes()
+        for schema : self.registry.find("schemas",{})
+            if isinstance(schema,map) && isinstance(schema.find("include"),list)
+                var includes = []
+                for include_name : schema["include"]
+                    if includes.find(include_name) == nil
+                        includes.push(include_name)
+                    end
+                end
+                schema["include"] = includes
+            end
         end
     end
 
@@ -766,21 +787,43 @@ class ZbmSchemaRegistry : ZbmNotify
         self.save_registry()
     end
 
-    def add_schema(schema_json)
-
+    def check_version(schema_json)
         if schema_json.contains("version") && (real(schema_json["version"]) != real(self.registry["version"]))
             raise "schema_error",f"mismatched schema version, registry is {self.registry['version']}, schema is {schema_json['version']}"
         end
+    end
 
+    # raises if schema_json could not be added to the registry
+    def validate_schema(schema_json)
+        self.check_version(schema_json)
+        ZbmSchemaProcessor.process_schemas(
+            schema_json,
+            ZbmSchemaProcessorInfo.schema_layout,
+            false,
+            false)
+    end
+
+    def add_schema(schema_json)
+        self.add_schemas([schema_json])
+    end
+
+    def add_schemas(schema_jsons)
+
+        for schema_json : schema_jsons
+            self.check_version(schema_json)
+        end
+
+        # the registry is merged first, so the schemas being added replace the values
+        # already stored for them rather than the stored values winning
         var processed_schema = ZbmSchemaProcessor.process_schemas(
-            [schema_json,self.registry],
+            [self.registry] + schema_jsons,
             ZbmSchemaProcessorInfo.schema_layout,
             true,
             false)
 
         self.set_registry(processed_schema)
 
-    end 
+    end
 
     def remove_schema(schema_name)
         if !self.registry["schemas"].contains(schema_name)
@@ -2116,59 +2159,224 @@ def zbm_reset_service(cmnd_name,idx,payload,payload_json)
     tasmota.resp_cmnd_done()    
 end
 
-def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
+class ZbmSchemaPuller
+    # downloads the schemas for a list of device keys, and the schemas they include,
+    # from the repository. each step runs from its own timer and makes at most one
+    # request, so no single call gets near the time berry code is allowed to run for
+    # (USE_BERRY_TIMEOUT, 4s by default) and tasmota keeps servicing mqtt, the web ui
+    # and zigbee while the files download. the files are validated as they arrive but
+    # only merged into the registry once all of them have been fetched, so a pull that
+    # fails leaves the registry as it was.
 
-    var url_base = "https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main"
-    def request_data(name)
+    static var url_base = "https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
+    static var timer_id = "zbm_pull_schemas"
+    static var step_delay = 100
+    static var retry_delay = 2000
+    static var max_attempts = 3
 
-        var url = f"{url_base}/schema/{name}"
-        var client = webclient()
-        client.set_follow_redirects(true)
-        client.begin(url)
-    
-        if client.GET() != 200 
-            raise "webrequest_error",f"unable to get {name}"
+    var log
+    var keys
+    var manifests
+    var pending
+    var requested
+    var schema_jsons
+    var downloaded
+    var step
+    var attempts
+    var running
+
+    def init(keys)
+        self.log = ZbmLogger("pull_schemas")
+        self.keys = []
+        for key : keys
+            if self.keys.find(key) == nil
+                self.keys.push(key)
+            end
         end
+        self.manifests = []
+        self.pending = []
+        self.requested = {}
+        self.schema_jsons = []
+        self.downloaded = []
+        self.attempts = 0
+        self.running = false
+    end
 
+    def start()
+        self.running = true
+        self.log.info(f"pulling schemas for {self.keys}")
+        self.next(/-> self.read_index())
+    end
+
+    def cancel()
+        self.running = false
+        tasmota.remove_timer(self.timer_id)
+    end
+
+    def next(step)
+        self.attempts = 0
+        self.schedule(step,self.step_delay)
+    end
+
+    def schedule(step,delay)
+        self.step = step
+        tasmota.set_timer(delay,/-> self.run_step(),self.timer_id)
+    end
+
+    def run_step()
+        if !self.running
+            return
+        end
         try
-            return json.load(client.get_string())
+            self.step()
+        except "webrequest_error","timeout_error" as e,m
+            # failed requests are retried. so is the step if a slow request ran
+            # into berry's time limit, it is started over from a new timer
+            self.attempts += 1
+            if self.attempts < self.max_attempts
+                self.log.info(f"{m}, retrying")
+                self.schedule(self.step,self.retry_delay * self.attempts)
+            else
+                self.finish(f"{e}, {m}")
+            end
         except .. as e,m
-            raise "webrequest_error",f"unable to get {name} - {e},{m}"
+            self.finish(f"{e}, {m}")
         end
-    end    
+    end
 
-    def get_schemas_names(items)
-        var manifest_list = request_data("index.json")["manifests"]
-        var required_includes = {}
-        def find_items()
+    def fetch(file_name)
+        var url = f"{self.url_base}/{file_name}"
+        self.log.debug(f"requesting {url}")
 
-            var found_schemas = []
-            for manifest_filename : manifest_list 
-                var schema_list = request_data(manifest_filename)["schemas"]
-                for schema_name : schema_list.keys()
-                    if schema_list[schema_name].contains("includes")
-                        for include : schema_list[schema_name]["includes"]
-                            required_includes[include + ".json"] = 0
-                        end
-                    end
-                    if schema_list[schema_name].contains("mappings")
-                        for mapping : schema_list[schema_name]["mappings"]
-                            var index
-                            if (index := items.find(mapping)) == nil
-                                continue
-                            end
-                            found_schemas.push({mapping:schema_name + ".json"})
-                            items.pop(index)
-                            if items.size() == 0
-                                return found_schemas
-                            end
-                        end
-                    end
+        var client = webclient()
+        var status
+        var content
+        try
+            client.set_follow_redirects(true)
+            client.begin(url)
+            status = client.GET()
+            if status == 200
+                content = client.get_string()
+            end
+        except .. as e,m
+            client.close()
+            raise "webrequest_error",f"unable to get {file_name} - {e} {m}"
+        end
+        client.close()
+
+        if status != 200
+            # only connection failures and server errors are worth retrying
+            var error = (status < 0 || status >= 500) ? "webrequest_error" : "schema_error"
+            raise error,f"unable to get {file_name} - http status {status}"
+        end
+
+        var data = content != nil ? json.load(content) : nil
+        if !isinstance(data,map)
+            raise "webrequest_error",f"unable to parse {file_name}"
+        end
+        return data
+    end
+
+    def request(schema_name)
+        if !self.requested.contains(schema_name)
+            self.requested[schema_name] = true
+            self.pending.push(schema_name)
+        end
+    end
+
+    def read_index()
+        var manifests = self.fetch("index.json").find("manifests")
+        if !isinstance(manifests,list)
+            raise "schema_error","index.json does not list any manifests"
+        end
+        self.manifests = manifests
+        self.next(/-> self.search_manifest())
+    end
+
+    # finds the schemas mapped to the keys, one manifest per step
+    def search_manifest()
+        if !size(self.keys) || !size(self.manifests)
+            if size(self.pending)
+                self.next(/-> self.download_schema())
+            else
+                self.finish()
+            end
+            return
+        end
+
+        var manifest = self.fetch(self.manifests[0])
+        self.manifests.remove(0)
+
+        var entries = manifest.find("schemas",{})
+        for schema_name : entries.keys()
+            if !isinstance(entries[schema_name],map)
+                continue
+            end
+            for mapping : entries[schema_name].find("mappings",[])
+                var key_index = self.keys.find(mapping)
+                if key_index != nil
+                    self.keys.remove(key_index)
+                    self.log.info(f"found schema {schema_name} for {mapping}")
+                    self.request(schema_name)
                 end
             end
-            return found_schemas
         end
-        return ZbmStruct({"found":find_items(),"notfound":items,"includes":to_list(required_includes.keys())})
+        self.next(/-> self.search_manifest())
+    end
+
+    # downloads one schema file per step, queueing the schemas it includes
+    def download_schema()
+        var schema_name = self.pending[0]
+        var schema_json = self.fetch(f"{schema_name}.json")
+        zbm_schema_registry.validate_schema(schema_json)
+        self.pending.remove(0)
+        self.schema_jsons.push(schema_json)
+        self.downloaded.push(schema_name)
+
+        for schema : schema_json.find("schemas",{})
+            for include_name : schema.find("include",[])
+                self.request(include_name)
+            end
+        end
+
+        if size(self.pending)
+            self.next(/-> self.download_schema())
+        else
+            self.next(/-> self.commit())
+        end
+    end
+
+    def commit()
+        zbm_schema_registry.add_schemas(self.schema_jsons)
+        self.finish()
+    end
+
+    def finish(error)
+        self.cancel()
+        if zbm_schema_puller == self
+            zbm_schema_puller = nil
+        end
+
+        var result = {"Status":error == nil ? "Done" : "Failed"}
+        if error == nil
+            self.log.info(f"pulled schemas {self.downloaded}")
+            result["Schemas"] = self.downloaded
+        else
+            self.log.error(f"unable to pull schemas, registry left unchanged - {error}")
+            result["Error"] = error
+        end
+        if size(self.keys)
+            self.log.info(f"no schema found for {self.keys}")
+            result["NotFound"] = self.keys
+        end
+        tasmota.publish_result(json.dump({"ZbmPullSchemas":result}),"RESULT")
+    end
+end
+
+def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
+
+    if zbm_schema_puller != nil
+        return log_cmnd_error(cmnd_name,"a schema pull is already in progress")
     end
 
     var request_list = []
@@ -2195,44 +2403,15 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
         request_list.push(device_info.key)
     end
 
-    var schema_info
-
-    try
-        schema_info = get_schemas_names(request_list)
-    except .. as e,m
-        ZbmLogger("pull_schema").error(f"unable to pull schemas, {e} {m}")
-        return tasmota.resp_cmnd_error()    
-    end
-    if schema_info.notfound.size()
-        ZbmLogger("pull_schema").info(f"unable to pull schemas for {schema_info.notfound}")
+    if !size(request_list)
+        log_cmnd_info(cmnd_name,"no devices without a schema")
+        return tasmota.resp_cmnd_done()
     end
 
-
-    var all_found = schema_info.includes
-    for found_item :  schema_info.found
-        var mapping_key = found_item.keys()()
-        var schema_filename = found_item.iter()()
-        ZbmLogger("pull_schema").info(f"found schema {schema_filename} for {mapping_key} ")
-        all_found.push(schema_filename)
-    end
-
-    var new_registry = zbm_schema_registry.registry
-    try
-        for found_schema : all_found
-            
-            var schema_json = request_data(found_schema)
-            new_registry = ZbmSchemaProcessor.process_schemas(
-                [schema_json,new_registry],
-                ZbmSchemaProcessorInfo.schema_layout,
-                true,
-                false)
-        end
-    except .. as e,m
-        ZbmLogger("pull_schema").info(f"failed building new registry, {e} {m}")
-        return
-    end
-    zbm_schema_registry.set_registry(new_registry)
-    tasmota.resp_cmnd_done()    
+    # the download continues in the background, the result is published once it is done
+    zbm_schema_puller = ZbmSchemaPuller(request_list)
+    zbm_schema_puller.start()
+    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Keys":zbm_schema_puller.keys}}))
 end
 
 class ZbmExtension
@@ -2264,6 +2443,10 @@ class ZbmExtension
 
     def unload()
 
+        if zbm_schema_puller != nil
+            zbm_schema_puller.cancel()
+            zbm_schema_puller = nil
+        end
         zbm_service.unload()
         zbm_schema_registry.unload()
         zbm_mqtt_bridge.unload()
