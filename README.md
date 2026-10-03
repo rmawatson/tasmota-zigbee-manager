@@ -229,6 +229,8 @@ All commands are either read only (ro), read write (rw) or, write only (wo). Une
 >}
 >```
 > Note: mappings and schemas are both optional, so you can add a mapping with this, or a schema, or both.
+>
+> Adding a schema or mapping that is already in the registry updates it, the values from the newly added schema replace the stored ones (an `include` list is replaced as a whole).
 
 > ## ZbmResetSchemas (ro)
 > Flushes all schemas from the registry and leaves it in a default state
