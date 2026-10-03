@@ -173,14 +173,20 @@ Note: it may require some experimentation in the console using tasmotas `ZbSend`
   
 ## Web UI
 
-The extension adds a **Zigbee Manager** button to the main page of the Tasmota web UI. It opens a page listing every device found on the bridge, with its manufacturer, model, key, the schema mapped to that key, link quality, battery, when it was last seen and its status. From there a device can be
+The extension adds a **Zigbee Manager** button to the main page of the Tasmota web UI. It opens three pages, which require admin access when a web password is set.
+
+**Devices** lists every device found on the bridge, with its manufacturer, model, key, the schema mapped to that key, link quality, battery, when it was last seen and its status. A device can be
 
 - named or renamed, using `ZbName`. A device that is already added is added again, so its MQTT topics follow the new name
-- added, as with `ZbmAddDevice`. Adding from the page also retries a device whose schema was missing or failed to compile earlier
+- added, as with `ZbmAddDevice`. A name entered for an unnamed device is set first, and adding from the page also retries a device whose schema was missing or failed to compile earlier
 - reset, as with `ZbmResetDevice`
 - removed, as with `ZbmRemoveDevice`
 
-The **Poll devices** and **Pull schemas** buttons run `ZbmPollDevices` and `ZbmPullSchemas`. The page requires admin access when a web password is set.
+The **Poll devices** and **Pull schemas** buttons run `ZbmPollDevices` and `ZbmPullSchemas`.
+
+**Schemas** lists the schemas in the registry, with the schemas they include, their entities and the keys mapped to them, and the mappings. A schema (`ZbmRemoveSchema`) or a mapping (`ZbmRemoveMapping`) can be removed, a mapping added (`ZbmAddMapping`, the keys of devices without a mapping are suggested), and **Reset schemas** removes every schema and mapping (`ZbmResetSchemas`).
+
+**Settings** changes the values set with `ZbmConfig`, and **Reset settings** sets them back to their defaults (`ZbmResetConfig`).
 
 ## Exposed commands
 
