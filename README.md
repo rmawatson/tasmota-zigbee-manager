@@ -186,6 +186,8 @@ The **Poll devices** and **Pull schemas** buttons run `ZbmPollDevices` and `ZbmP
 
 **Schemas** lists the schemas in the registry, with the schemas they include, their entities and the keys mapped to them, and the mappings. A schema (`ZbmRemoveSchema`) or a mapping (`ZbmRemoveMapping`) can be removed, a mapping added (`ZbmAddMapping`, the keys of devices without a mapping are suggested), and **Reset schemas** removes every schema and mapping (`ZbmResetSchemas`).
 
+A schema can also be pasted, or loaded from a file, and uploaded. It is checked before anything is stored: it must be valid JSON with the registry's version, follow the schema layout, have functions that compile, and only include or map to schemas that are in the registry or in the same upload. A schema that fails is rejected with the reason and left in the box to be corrected. An uploaded schema replaces a schema with the same name as a whole, and added devices using it are configured again.
+
 **Settings** changes the values set with `ZbmConfig`, and **Reset settings** sets them back to their defaults (`ZbmResetConfig`).
 
 ## Exposed commands
