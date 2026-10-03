@@ -534,6 +534,9 @@ class ZbmSchemaProcessor
                 elif isinstance(schema_el[0],map)
                     next_storage =  {}
                 end
+                # a list is merged as a single value, the payload processed last replaces
+                # it. appending would repeat every entry each time a schema is re-added
+                storage.clear()
             end
 
             for pl_val : payload_el
@@ -687,7 +690,24 @@ class ZbmSchemaRegistry : ZbmNotify
     def load_registry()
         if persist.has("zbm_registry") && persist.zbm_registry != nil
             self.registry = _copy(persist.zbm_registry,true)
+            self.remove_duplicate_includes()
             self.log.debug("loaded persisted registry")
+        end
+    end
+
+    # registries saved by earlier versions can list the same include several times,
+    # as every merge appended the include list to the one already stored
+    def remove_duplicate_includes()
+        for schema : self.registry.find("schemas",{})
+            if isinstance(schema,map) && isinstance(schema.find("include"),list)
+                var includes = []
+                for include_name : schema["include"]
+                    if includes.find(include_name) == nil
+                        includes.push(include_name)
+                    end
+                end
+                schema["include"] = includes
+            end
         end
     end
 
@@ -772,8 +792,10 @@ class ZbmSchemaRegistry : ZbmNotify
             raise "schema_error",f"mismatched schema version, registry is {self.registry['version']}, schema is {schema_json['version']}"
         end
 
+        # the registry is merged first, so the schema being added replaces the values
+        # already stored for it rather than the stored values winning
         var processed_schema = ZbmSchemaProcessor.process_schemas(
-            [schema_json,self.registry],
+            [self.registry,schema_json],
             ZbmSchemaProcessorInfo.schema_layout,
             true,
             false)
@@ -2222,7 +2244,7 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
             
             var schema_json = request_data(found_schema)
             new_registry = ZbmSchemaProcessor.process_schemas(
-                [schema_json,new_registry],
+                [new_registry,schema_json],
                 ZbmSchemaProcessorInfo.schema_layout,
                 true,
                 false)
