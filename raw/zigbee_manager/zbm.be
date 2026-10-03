@@ -487,16 +487,18 @@ class ZbmSchemaProcessorInfo
             end
         end
 
-        var number = 1
+        # not called number, tasmota loads extensions in strict mode, where a variable
+        # cannot have the name of a builtin
+        var free_number = 1
         for relay_name : unnumbered
-            while taken.contains(number)
-                number += 1
+            while taken.contains(free_number)
+                free_number += 1
             end
-            if number > _class.max_relays
+            if free_number > _class.max_relays
                 raise "schema_error", f"no relay number is left for '{relay_name}', a device has at most {_class.max_relays} relays"
             end
-            numbers[relay_name] = number
-            taken[number] = relay_name
+            numbers[relay_name] = free_number
+            taken[free_number] = relay_name
         end
         return numbers
     end
