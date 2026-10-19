@@ -1524,8 +1524,12 @@ class ZbmState : ZbmNotify
         end
     end
 
-    # tasmota restarts, the saves that wait are written now
+    # tasmota restarts, the saves that wait are written now, and the devices as they are. The
+    # devices are saved from here as the service is only a driver while it polls them
     def save_before_restart()
+        if zbm_service != nil
+            zbm_service.save_all_devices()
+        end
         ZbmStore.flush_all()
     end
 
@@ -1615,6 +1619,14 @@ class ZbmService
         self.store.save_later(/-> self.saved_devices())
     end
 
+    # the devices as they are, also when only their link quality, battery or last seen changed,
+    # which start no save of their own. Written when tasmota restarts or the extension stops
+    def save_all_devices()
+        self.saved_text = self.lasting_text()
+        self.store.save_later(/-> self.saved_devices())
+        self.store.flush()
+    end
+
     def load_devices()
         var saved_devices = self.store.load_moved("zbm_device_infos")
         if saved_devices != nil
@@ -1641,8 +1653,7 @@ class ZbmService
         for device_info : self.device_infos.iter()
             zbm_mqtt_bridge.dispatch_online_state(device_info,false)
         end
-        self.save_devices()
-        self.store.flush()
+        self.save_all_devices()
     end
 
     def on_auto_poll_devices_changed(should_poll)
@@ -3488,6 +3499,7 @@ class ZbmExtension
 
     def unload()
 
+        zbm_service.save_all_devices()
         ZbmStore.flush_all()
         if zbm_schema_puller != nil
             zbm_schema_puller.cancel()
