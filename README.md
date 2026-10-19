@@ -158,6 +158,17 @@ setting `format_category` for the sensor `Pressed` (see `schema/sonoff_snzb-01p.
 ```
 (This example has also had the LinkQuality sensor's `format_category` set to `Zigbee` (see `schema/link_quality.json`) )
 
+### Where the data is kept
+
+The registry (the schemas and mappings), the settings and the device list are kept in three files in the `/zigbee_manager` folder, `registry.json`, `settings.json` and `devices.json`. They are not kept in Tasmota's `persist` (`_persist.json`): that one file holds the data of every Berry extension, and when it is lost or cut short, as a power cut can do, the next save of any extension writes over all of it.
+
+- A save writes `<file>.tmp` first, keeps the file it replaces as `<file>.bak`, then renames the `.tmp` to the file, so there is a complete copy at every step.
+- A file that can not be read is kept as `<file>.bad`, with an error in the log, and the `.bak` is loaded instead, or the `.tmp` of a save that was cut short before its rename.
+- A change is written a second later, so a burst of changes is written once, and straight away when Tasmota restarts or the extension stops. A change in the second before a power cut is lost.
+- Starting, zigbee starting and mqtt connecting write nothing. The device list is written when a device is added, removed, renamed or its status changes, not when only its link quality, battery or last seen change.
+- The first time this version starts, it moves what earlier versions kept in `persist` into these files, and removes it from `persist`. An older version started afterwards finds nothing there, and starts with no schemas and the default settings. Whatever it saves to `persist` is moved over the files when this version starts again.
+- Uninstalling the extension leaves the folder, delete it to remove the data.
+
 ## Creating a schema
 
 Assuming the device is connected to the zigbee bridge,

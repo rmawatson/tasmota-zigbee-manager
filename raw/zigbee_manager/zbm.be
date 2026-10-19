@@ -1,7 +1,6 @@
 # MIT License - Copyright (c) 2025 rmawatson@hotmail.com - See LICENSE file for details
 #-  -#
 
-import persist
 import zigbee
 import json
 import string
@@ -161,6 +160,153 @@ class ZbmLogger
 
     def error(message)
         self.log_message(1,message)
+    end
+end
+
+class ZbmStore
+    # a json file of zigbee manager's own, in place of tasmota's persist. _persist.json holds the
+    # data of every berry extension, every save rewrites it in place, and tasmota writes {} to it
+    # when a write fails, so a power cut, or a save after it came back empty, can lose all of it.
+    # A save here writes <file>.tmp, keeps the file it replaces as <file>.bak, then renames the
+    # .tmp to <file>, so a complete copy is on the file system at every step. A file that can not
+    # be read is kept as <file>.bad, never written over, and the .tmp of a save that was cut short,
+    # or the .bak, is read instead
+
+    static var dir = "/zigbee_manager"
+    static var save_delay = 1000      # ms, a burst of saves is written once
+    static var stores = []            # every store, for flush_all
+
+    var file
+    var pending         # the function giving the value of a save that waits
+    var text            # the json in the file, saving the same json again writes nothing
+    var log
+
+    def init(name)
+        self.file = f"{self.dir}/{name}.json"
+        self.log = ZbmLogger("store")
+        _class.stores.push(self)
+    end
+
+    # a json object from a file, or nil when it is missing or not complete
+    static def read(file_name)
+        var f
+        try
+            f = open(file_name, "r")
+            var value = json.load(f.read())
+            f.close()
+            return isinstance(value, map) ? value : nil
+        except ..
+            if f != nil
+                f.close()
+            end
+            return nil
+        end
+    end
+
+    # the value in the file, or nil when there is none
+    def load()
+        import path
+        var value = self.read(self.file)
+        if value == nil && path.exists(self.file)
+            # kept to look at, the next save would otherwise make it the .bak
+            path.remove(self.file + ".bad")
+            path.rename(self.file, self.file + ".bad")
+            self.log.error(f"{self.file} can not be read, it is kept as {self.file}.bad")
+        end
+        if value == nil && (value := self.read(self.file + ".tmp")) != nil
+            # a save that was cut short after writing its .tmp, finished now
+            path.rename(self.file + ".tmp", self.file)
+        end
+        if value == nil && (value := self.read(self.file + ".bak")) != nil
+            self.log.error(f"{self.file} is missing, loaded {self.file}.bak")
+        end
+        self.text = value != nil ? json.dump(value) : nil
+        return value
+    end
+
+    # the value earlier versions kept in persist under persist_key, moved here. It is removed
+    # from persist once saved, so persist only has it again when an older version saved it since
+    def load_moved(persist_key)
+        import persist
+        var value = persist.find(persist_key)
+        if !isinstance(value, map)
+            return self.load()
+        end
+        if self.save(value)
+            persist.remove(persist_key)
+            try
+                persist.save()
+            except .. as e, m
+                self.log.error(f"unable to save persist - {e} {m}")
+            end
+            self.log.info(f"moved {persist_key} from persist to {self.file}")
+        end
+        return value
+    end
+
+    # writes the value, unless the file has the same already. Returns false, and leaves the file
+    # as it was, when it can not be written
+    def save(value)
+        import path
+        var text = json.dump(value)
+        if text == self.text
+            return true
+        end
+        var tmp = self.file + ".tmp"
+        var f
+        try
+            if !path.isdir(self.dir)
+                path.mkdir(self.dir)
+            end
+            f = open(tmp, "w")
+            f.write(text)
+            f.close()
+            f = nil
+            # the file being replaced is kept as the .bak
+            if path.exists(self.file)
+                path.remove(self.file + ".bak")
+                if !path.rename(self.file, self.file + ".bak")
+                    raise "io_error", f"can not rename {self.file}"
+                end
+            end
+            if !path.rename(tmp, self.file)
+                raise "io_error", f"can not rename {tmp}"
+            end
+        except .. as e, m
+            if f != nil
+                f.close()
+            end
+            self.log.error(f"unable to save {self.file} - {e} {m}")
+            return false
+        end
+        self.text = text
+        return true
+    end
+
+    # saves the value fn gives a second after the first save asked for, a burst of changes is
+    # written once
+    def save_later(fn)
+        if self.pending == nil
+            tasmota.set_timer(self.save_delay, /-> self.flush(), self.file)
+        end
+        self.pending = fn
+    end
+
+    # writes a save that waits, now
+    def flush()
+        var fn = self.pending
+        if fn == nil
+            return true
+        end
+        self.pending = nil
+        tasmota.remove_timer(self.file)
+        return self.save(fn())
+    end
+
+    static def flush_all()
+        for store : _class.stores
+            store.flush()
+        end
     end
 end
 
@@ -736,6 +882,7 @@ class ZbmSchemaRegistry : ZbmNotify
     #var registry
     var compiled_cache
     var log
+    var store
 
     static var default_registry = {
         "version": 1.0,
@@ -750,6 +897,7 @@ class ZbmSchemaRegistry : ZbmNotify
 
         super(self).init({"registry":_copy(self.default_registry)})
 
+        self.store = ZbmStore("registry")
         self.load_registry()
         self.compiled_cache = {}
 
@@ -760,17 +908,16 @@ class ZbmSchemaRegistry : ZbmNotify
     end
 
     def save_registry()
-        persist.zbm_registry = self.registry
-        persist.save(true)
-        self.log.debug("saved registry")
+        self.store.save_later(/-> self.registry)
     end
 
     def load_registry()
-        if persist.has("zbm_registry") && persist.zbm_registry != nil
-            self.registry = _copy(persist.zbm_registry,true)
+        var registry = self.store.load_moved("zbm_registry")
+        if registry != nil
+            self.registry = _copy(registry,true)
             self.remove_duplicate_includes()
             self.remove_invalid_mappings()
-            self.log.debug("loaded persisted registry")
+            self.log.debug("loaded saved registry")
         end
     end
 
@@ -805,8 +952,7 @@ class ZbmSchemaRegistry : ZbmNotify
     def reset()
         self.registry = _copy(self.default_registry)
         self.compiled_cache = {}
-        persist.zbm_registry = nil
-        persist.save(true)
+        self.save_registry()
     end
 
     def compile_schema(schema_name)
@@ -1014,22 +1160,7 @@ class ZbmMqttBridge
         self.topic_cache = {}
         self.device_topics = {}
         self.relay_states = {}
-        self.load_cache()
     end 
-
-    def save_cache()
-        persist.zbm_bridge_topic_cache = self.topic_cache
-        persist.save(true)
-    end
-
-    # note: save_cache is never called, so nothing is loaded here. if the cache is ever
-    # saved, this has to read persist.zbm_bridge_topic_cache, not persist.topic_cache
-    def load_cache()
-        if persist.has("zbm_bridge_topic_cache")
-            self.topic_cache = _copy(persist.topic_cache,true)
-            self.log.info("loaded persisted topic cache")
-        end
-    end
     
     def unload()
         for topics : self.device_topics
@@ -1331,6 +1462,7 @@ end
 class ZbmState : ZbmNotify
 
     var log
+    var store
     static var config_defaults = {
         "auto_poll_devices":true,
         "auto_poll_devices_period":5,
@@ -1355,8 +1487,12 @@ class ZbmState : ZbmNotify
         self.log = ZbmLogger("state")
 
         super(self).init(info)
+        self.store = ZbmStore("settings")
         self.load_state()
-        self.on_changed("*",/value -> self.value_changed(value))
+        # only the settings are saved, the zigbee and mqtt status change with every restart
+        for config_key : self.config_defaults.keys()
+            self.on_changed(config_key,/value -> self.save_state())
+        end
         tasmota.add_driver(self)
         end 
 
@@ -1364,32 +1500,33 @@ class ZbmState : ZbmNotify
         for key : self.config_defaults.keys()
             self.setmember(key,self.config_defaults[key])
         end
-        persist.zbm_state  = nil
-        persist.save(true)
-    end
-
-    def value_changed(value)
-        self.save_state()
     end
 
     def save_state()
+        self.store.save_later(/-> self.saved_state())
+    end
+
+    def saved_state()
         var saved_state = {}
         for key : self.config_defaults.keys()
             saved_state[key] = self.info[key]
         end
-        persist.zbm_state = saved_state
-        persist.save(true)
-        self.log.debug("saved state")
+        return saved_state
     end
 
     def load_state()
-        if persist.has("zbm_state") && persist.zbm_state != nil
-            for key : persist.zbm_state.keys()
-
-                self.info[key] = persist.zbm_state[key]
-            end            
-            self.log.debug(f"loaded persisted state {self.info}")
+        var saved_state = self.store.load_moved("zbm_state")
+        if saved_state != nil
+            for key : saved_state.keys()
+                self.info[key] = saved_state[key]
+            end
+            self.log.debug(f"loaded saved state {self.info}")
         end
+    end
+
+    # tasmota restarts, the saves that wait are written now
+    def save_before_restart()
+        ZbmStore.flush_all()
     end
 
     def unload()
@@ -1408,11 +1545,17 @@ class ZbmService
     var device_infos
     var poll_count
     var log
+    var store
+    var saved_text      # the lasting details of the devices as last saved, see save_devices
+
+    # these change with every message, and the poll reads them from the bridge again
+    static var passing_keys = ["lastseen", "lqi", "battery", "battery_lastseen", "reachable"]
 
 
     def init()
         self.log = ZbmLogger("device_manager")
         self.device_infos = {}
+        self.store = ZbmStore("devices")
         self.load_devices()
         self.poll_count = 0
         zigbee.add_handler(self)
@@ -1432,30 +1575,57 @@ class ZbmService
         self.log.info("uninitialized")
     end
 
-    def save_devices()
+    def saved_devices()
         var saved_devices = {}
         for key : self.device_infos.keys()
-
             var device_info = self.device_infos[key]
             if device_info.status != 0
                 saved_devices[key] = device_info.info
             end
-            
         end
-        self.log.debug(f"saved devices.")
-        persist.zbm_device_infos = saved_devices
-        persist.save(true)
+        return saved_devices
+    end
+
+    # the devices as json, without the details that change with every message
+    def lasting_text()
+        var lasting = {}
+        for key : self.device_infos.keys()
+            var device_info = self.device_infos[key]
+            if device_info.status != 0
+                var info = {}
+                for name : device_info.info.keys()
+                    if self.passing_keys.find(name) == nil
+                        info[name] = device_info.info[name]
+                    end
+                end
+                lasting[key] = info
+            end
+        end
+        return json.dump(lasting)
+    end
+
+    # saved when a device is added, removed, renamed or its status changes. Every device is
+    # configured again when zigbee starts or mqtt connects, which changes none of them
+    def save_devices()
+        var text = self.lasting_text()
+        if text == self.saved_text
+            return
+        end
+        self.saved_text = text
+        self.store.save_later(/-> self.saved_devices())
     end
 
     def load_devices()
-        if persist.has("zbm_device_infos") && persist.zbm_device_infos != nil
-            for key : persist.zbm_device_infos.keys()
-                var shortaddr = persist.zbm_device_infos[key]["shortaddr"]
-                var device_info = ZbmDeviceInfo(persist.zbm_device_infos[key])
+        var saved_devices = self.store.load_moved("zbm_device_infos")
+        if saved_devices != nil
+            for key : saved_devices.keys()
+                var shortaddr = saved_devices[key]["shortaddr"]
+                var device_info = ZbmDeviceInfo(saved_devices[key])
                 self.device_infos[shortaddr] = device_info
-                self.log.debug(f"loaded persisted device {self.device_infos[shortaddr]}")
+                self.log.debug(f"loaded saved device {self.device_infos[shortaddr]}")
             end
         end
+        self.saved_text = self.lasting_text()
     end
 
     def reset()
@@ -1463,8 +1633,7 @@ class ZbmService
             zbm_mqtt_bridge.unsubscribe_device(device_info)
         end
         self.device_infos = {}
-        persist.zbm_device_infos = nil
-        persist.save(true)
+        self.save_devices()
     end
     
     def save_before_restart()
@@ -1473,6 +1642,7 @@ class ZbmService
             zbm_mqtt_bridge.dispatch_online_state(device_info,false)
         end
         self.save_devices()
+        self.store.flush()
     end
 
     def on_auto_poll_devices_changed(should_poll)
@@ -3318,6 +3488,7 @@ class ZbmExtension
 
     def unload()
 
+        ZbmStore.flush_all()
         if zbm_schema_puller != nil
             zbm_schema_puller.cancel()
             zbm_schema_puller = nil
