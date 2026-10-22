@@ -14,7 +14,6 @@ var zbm_state = nil
 var zbm_mqtt_bridge = nil
 var zbm_schema_registry = nil
 var zbm_service = nil
-var zbm_schema_puller = nil
 var zbm_web_ui = nil
 
 def _join(li, sep, fn)
@@ -1144,13 +1143,57 @@ class ZbmSchemaRegistry : ZbmNotify
     def mapping(key)
         return self.registry["mappings"].contains(key) ? self.registry["mappings"][key] : nil
     end
-    
+
+end
+
+class ZbmOnOff
+    # the values of an on/off entity, a relay. A schema's set_value is given 1 or 0, and its
+    # parse_value returns on or off in whatever form suits it. mqtt, the console and the web ui
+    # use tasmota's words, these convert between the two
+
+    static var on_words = ["ON","1","TRUE"]
+    static var off_words = ["OFF","0","FALSE"]
+    static var toggle_words = ["TOGGLE","2"]
+
+    # a command's payload: 1 for ON, 1 or TRUE, 0 for OFF, 0 or FALSE, in any case, and for
+    # TOGGLE or 2 the opposite of last, the state the relay was last in (on when not known).
+    # nil for anything else
+    static def parse(payload,last)
+        var word = string.toupper(strip(str(payload)))
+        if _class.on_words.find(word) != nil
+            return 1
+        elif _class.off_words.find(word) != nil
+            return 0
+        elif _class.toggle_words.find(word) != nil
+            return last ? 0 : 1
+        end
+        return nil
+    end
+
+    # the value parse_value returned, as tasmota's ON or OFF: true or a number other than 0 is
+    # ON, false or 0 is OFF, and the words parse takes for on and off are ON and OFF. nil for
+    # anything else
+    static def format(value)
+        if type(value) == "bool"
+            return value ? "ON" : "OFF"
+        elif type(value) == "int" || type(value) == "real"
+            return value != 0 ? "ON" : "OFF"
+        elif type(value) == "string"
+            var word = string.toupper(strip(value))
+            if _class.on_words.find(word) != nil
+                return "ON"
+            elif _class.off_words.find(word) != nil
+                return "OFF"
+            end
+        end
+        return nil
+    end
 end
 
 class ZbmMqttBridge
 
     var device_topics   # shortaddr -> the cmnd topics subscribed to for the device's relays
-    var relay_states    # "shortaddr:relay number" -> true when the relay was last on, for TOGGLE
+    var relay_states    # "shortaddr:relay number" -> true when the relay was last on, for TOGGLE and the web ui
     var topic_cache
     var log 
     
@@ -1198,12 +1241,13 @@ class ZbmMqttBridge
             var value = dispatch_data.value
 
             if category_name == "relays"
-                var state_topic = f"tele/{device_info.name}/STATE"
-
-                var publish_value = (type(value) == "int" || type(value) == "bool") ? (value ? "ON" : "OFF") : value
-                if type(publish_value) == "string" && ["ON","OFF"].find(string.toupper(publish_value)) != nil
-                    self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = string.toupper(publish_value) == "ON"
+                # published with tasmota's ON and OFF, the words the discovery config gives
+                var publish_value = ZbmOnOff.format(value)
+                if publish_value == nil
+                    self.log.error(f"relay '{entity_name}' of {device_info.name}: parse_value returned {value}, expected on or off, as true or false, 1 or 0, or ON or OFF")
+                    continue
                 end
+                self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = publish_value == "ON"
                 mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",publish_value)
                 mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":publish_value}))
 
@@ -1261,29 +1305,34 @@ class ZbmMqttBridge
         end
     end
 
+    # the state relay_number of the device was last in, true for on, nil when not known
+    def relay_state(device_info,relay_number)
+        return self.relay_states.find(f"{device_info.shortaddr}:{relay_number}")
+    end
+
+    # sets a relay to value, 1 or 0, with the schema's set_value, for a command from mqtt, the
+    # ZbmPower command or the web ui. Returns false when set_value is turned off or failed
+    def set_relay(device_info,relay_number,relay_components,value)
+        var result = zb_invoke_handler("set_value",relay_components,device_info,value)
+        if result == zb_handler_invalid || result == zb_handler_error
+            return false
+        end
+        # until the device reports its state, so a second TOGGLE before then switches back
+        self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = value == 1
+        return true
+    end
+
     def relay_command_handler(device_info,relay_number,relay_components,relay_name,payload)
         self.log.debug(f"recieved command {payload} for {relay_name}")
 
-        # the payloads of tasmota's Power command. TOGGLE switches to the opposite of the
-        # state the relay last reported
-        var state_key = f"{device_info.shortaddr}:{relay_number}"
-        var command = string.toupper(strip(str(payload)))
-        var payload_value
-        if ["1","ON","TRUE"].find(command) != nil
-            payload_value = 1
-        elif ["0","OFF","FALSE"].find(command) != nil
-            payload_value = 0
-        elif ["2","TOGGLE"].find(command) != nil
-            payload_value = self.relay_states.find(state_key) ? 0 : 1
-        else
+        # the payloads of tasmota's Power command, TOGGLE switches to the opposite of the
+        # state the relay was last in
+        var value = ZbmOnOff.parse(payload,self.relay_state(device_info,relay_number))
+        if value == nil
             self.log.error(f"unparseable payload value {payload} for relay {relay_name}, expected ON, OFF or TOGGLE")
             return
         end
-
-        if zb_invoke_handler("set_value",relay_components,device_info,payload_value) != zb_handler_error
-            # until the device reports its state, so a second TOGGLE before then switches back
-            self.relay_states[state_key] = payload_value == 1
-        end
+        self.set_relay(device_info,relay_number,relay_components,value)
 
         # self.log.debug("publishing early response")
         # mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",string.toupper(payload))
@@ -1816,6 +1865,52 @@ class ZbmService
         return compiled_schema
     end
 
+    # the relays of an added device that can be set, [relay number, relay name, components] in
+    # number order. Empty when it has none, or no schema that can be used, which is left to its
+    # next message to flag
+    def device_relays(device_info)
+        var relays = []
+        if device_info.status & ZbmDeviceStatus.ErrorFlag || !(device_info.status & ZbmDeviceStatus.Added)
+            return relays
+        end
+        var schema_name = zbm_schema_registry.mapping(device_info.key)
+        if schema_name == nil
+            return relays
+        end
+        var compiled_schema
+        try
+            compiled_schema = zbm_schema_registry.schema(schema_name)
+        except ..
+            return relays
+        end
+        if !compiled_schema.valid || !compiled_schema.schema.contains("relays")
+            return relays
+        end
+        for relay_name : compiled_schema.schema["relays"].keys()
+            var components = compiled_schema.schema["relays"][relay_name]
+            if !components.contains("set_value")
+                continue
+            end
+            var relay_number = compiled_schema.relay_numbers[relay_name]
+            var position = 0
+            while position < size(relays) && relays[position][0] < relay_number
+                position += 1
+            end
+            relays.insert(position,[relay_number,relay_name,components])
+        end
+        return relays
+    end
+
+    # relay relay_number of the device as device_relays gives it, nil when it has no such relay
+    def find_relay(device_info,relay_number)
+        for relay : self.device_relays(device_info)
+            if relay[0] == relay_number
+                return relay
+            end
+        end
+        return nil
+    end
+
     def update_device(device_info)
         var stored = self.device_infos[device_info.shortaddr]
         if introspect.toptr(stored) == introspect.toptr(device_info)
@@ -2249,6 +2344,26 @@ def find_device(cmnd_name, idx, payload, payload_json,arg_spec)
     return ZbmStruct({"device":found_device,"identifier":identifier,"args":parsed_args})
 end
 
+# the device a command names, by its short address in hex or decimal, 0x120E or 4622, or by its
+# name. Unlike find_device the devices are not polled first, so switching stays quick
+def device_by_id_or_name(identifier)
+    var shortaddr
+    try
+        shortaddr = valid_integer(identifier)
+    except ..
+        shortaddr = nil
+    end
+    if shortaddr != nil && zbm_service.device_infos.contains(shortaddr)
+        return zbm_service.device_infos[shortaddr]
+    end
+    for device_info : zbm_service.device_infos.iter()
+        if !(device_info.status & ZbmDeviceStatus.Unnamed) && device_info.name == identifier
+            return device_info
+        end
+    end
+    return nil
+end
+
 def zbm_add_device(cmnd_name, idx, payload, payload_json)
 
     var arg_spec = [ZbmOptional(ZbmTransformed("deviceid",valid_integer)),
@@ -2432,6 +2547,43 @@ def zbm_devices(cmnd_name, idx, payload, payload_json)
     tasmota.resp_cmnd(json.dump(status))
 end
 
+# ZbmPower<n> <device>,<ON|OFF|TOGGLE> sets relay n of an added device, like tasmota's Power<n>
+# and the device's cmnd/<name>/Power<n> topic, and without a value reports its state. n is 1
+# when it is left off
+def zbm_power(cmnd_name, idx, payload, payload_json)
+
+    var parsed_args
+    if (parsed_args := parse_args(cmnd_name,payload,payload_json,["device",ZbmOptional("power")])) == nil
+        return
+    end
+
+    var device_info = device_by_id_or_name(parsed_args[0].value)
+    if device_info == nil
+        return log_cmnd_error(cmnd_name,f"device {parsed_args[0].value} not found")
+    end
+    var relay = zbm_service.find_relay(device_info,idx)
+    if relay == nil
+        return log_cmnd_error(cmnd_name,f"{device_info.name} has no relay {idx}, or is not added")
+    end
+
+    var power = parsed_args[1].value
+    if power != nil
+        var value = ZbmOnOff.parse(power,zbm_mqtt_bridge.relay_state(device_info,idx))
+        if value == nil
+            return log_cmnd_error(cmnd_name,f"invalid value '{power}', expected ON, OFF or TOGGLE")
+        end
+        if !zbm_mqtt_bridge.set_relay(device_info,idx,relay[2],value)
+            return log_cmnd_error(cmnd_name,f"unable to set relay {idx} of {device_info.name}, its set_value failed, see the log with log_level 3")
+        end
+    end
+
+    # after a change, the state asked for, until the device reports it
+    var state = zbm_mqtt_bridge.relay_state(device_info,idx)
+    tasmota.resp_cmnd(json.dump({f"{cmnd_name}{idx}":{"devicename":device_info.name,
+                                                    "deviceid":device_info.deviceid,
+                                                    "state":state == nil ? nil : (state ? "ON" : "OFF")}}))
+end
+
 def zbm_config(cmmd_name,idx,payload,payload_json)
 
     if !size(payload) && payload_json == nil
@@ -2554,6 +2706,13 @@ class ZbmSchemaPuller
     static var step_delay = 100
     static var retry_delay = 2000
     static var max_attempts = 3
+
+    # the pull in progress, nil when there is none. Kept here rather than in a variable of the
+    # module: the module's functions see its variables as upvalues, and berry can give two of
+    # them separate copies of one (be_func.c findupval adds an upvalue at the head of a list it
+    # expects in order), which stop agreeing once the module has loaded. Every function has
+    # the same class, assigned while it loads, so they all see the same pull
+    static var current = nil
 
     var log
     var keys
@@ -2754,8 +2913,8 @@ class ZbmSchemaPuller
 
     def finish(error)
         self.cancel()
-        if zbm_schema_puller == self
-            zbm_schema_puller = nil
+        if _class.current == self
+            _class.current = nil
         end
 
         var result = {"Status":error == nil ? "Done" : "Failed"}
@@ -2777,7 +2936,7 @@ end
 
 def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
 
-    if zbm_schema_puller != nil
+    if ZbmSchemaPuller.current != nil
         return log_cmnd_error(cmnd_name,"a schema pull is already in progress")
     end
 
@@ -2808,9 +2967,10 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
     end
 
     # the download continues in the background, the result is published once it is done
-    zbm_schema_puller = ZbmSchemaPuller(request_list)
-    zbm_schema_puller.start()
-    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Keys":zbm_schema_puller.keys}}))
+    var puller = ZbmSchemaPuller(request_list)
+    ZbmSchemaPuller.current = puller
+    puller.start()
+    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Keys":puller.keys}}))
 end
 
 class ZbmWebUI
@@ -2852,6 +3012,35 @@ class ZbmWebUI
         ".zt .zc{background:var(--c_btnoff);}"
         "button:disabled{opacity:0.5;cursor:default;}"
         "</style>"
+
+    # the relay switches, on the devices page and on tasmota's main page, coloured like tasmota's
+    # own relay buttons. The checkbox is hidden behind the slider, zu dims a state not known yet
+    static var switch_style = "<style>"
+        ".zsw{position:relative;display:inline-block;width:2.4em;height:1.3em;vertical-align:middle;margin:1px 0;}"
+        ".zsw>input{position:absolute;opacity:0;width:0;height:0;margin:0;padding:0;}"
+        ".zsw>span{position:absolute;top:0;left:0;right:0;bottom:0;border-radius:0.65em;background:var(--c_btnoff);cursor:pointer;transition:0.2s;}"
+        ".zsw>span:before{content:'';position:absolute;left:0.15em;top:0.15em;width:1em;height:1em;border-radius:50%;background:var(--c_btntxt);transition:0.2s;}"
+        ".zsw>input:checked+span{background:var(--c_btn);}"
+        ".zsw>input:checked+span:before{transform:translateX(1.1em);}"
+        ".zsw.zu>span{opacity:0.4;}"
+        "</style>"
+
+    # on the main page a click is sent with tasmota's own refresh, la(), whose answer has the
+    # sensor table with the switches in their new state, see web_get_arg and web_sensor
+    static var main_script = "<script>function zbmsw(e){la('&zbmr='+e.dataset.r+'_'+(e.checked?1:0))}</script>"
+
+    # on the devices page a click is posted, and answered with the states of the relays, which
+    # are also polled every two seconds. A switch clicked in the last three seconds is left to the
+    # answer to its own click
+    static var devices_script = "<script>"
+        "function zbst(s,c){document.querySelectorAll('input[data-r]').forEach(e=>{"
+        "if(e!=c&&Date.now()-(e.dataset.t||0)<3000)return;"
+        "var v=s[e.dataset.r];e.checked=v==1;e.parentNode.classList.toggle('zu',v==null)})}"
+        "function zbmsw(e){e.dataset.t=Date.now();"
+        "fetch('zbman',{method:'POST',body:new URLSearchParams({act:'relay',r:e.dataset.r+'_'+(e.checked?1:0)})})"
+        ".then(r=>r.json()).then(s=>zbst(s,e)).catch(()=>{})}"
+        "setInterval(()=>fetch('zbman?rs=1').then(r=>r.json()).then(s=>zbst(s)).catch(()=>{}),2000);"
+        "</script>"
 
     static var max_schema_size = 16384
 
@@ -2898,6 +3087,77 @@ class ZbmWebUI
     def web_add_main_button()
         import webserver
         webserver.content_send("<p></p><form id=but_zbman style='display:block;' action='zbman' method='get'><button>Zigbee Manager</button></form>")
+        # for the relay switches web_sensor puts in the sensor table
+        webserver.content_send(self.switch_style + self.main_script)
+    end
+
+    # a switch for every relay of the added devices, in the sensor table of the main page, which
+    # tasmota refreshes every few seconds, so they follow the relays' states. They come after
+    # tasmota's own zigbee devices and buttons, under a line as tasmota puts between sensors
+    def web_sensor()
+        var rows = ""
+        for device_info : self.sorted_devices()
+            var relays = zbm_service.device_relays(device_info)
+            for relay : relays
+                var label = size(relays) > 1 ? f"{device_info.name} {relay[1]}" : device_info.name
+                rows += "{s}" + self.text(label) + "{m}" + self.relay_switch(device_info,relay[0]) + "{e}"
+            end
+        end
+        if size(rows)
+            tasmota.web_send("<tr><td colspan=2 style='font-size:2px'><hr></td></tr>" + rows)
+        end
+    end
+
+    # a switch clicked on the main page, &zbmr=<short address>_<relay number>_<1 or 0>, sent by
+    # tasmota's refresh before it asks for the sensor table
+    def web_get_arg()
+        import webserver
+        if webserver.has_arg("zbmr")
+            self.switch_relay(webserver.arg("zbmr"))
+        end
+    end
+
+    # a switch for relay relay_number of the device that shows its state, dimmed while that is not
+    # known, and sets the relay to 1 or 0 when clicked, with the page's zbmsw()
+    def relay_switch(device_info,relay_number)
+        var state = zbm_mqtt_bridge.relay_state(device_info,relay_number)
+        var unknown = state == nil ? " zu" : ""
+        var checked = state ? " checked" : ""
+        return f"<label class='zsw{unknown}'><input type='checkbox' data-r='{device_info.shortaddr}_{relay_number}'{checked} onchange='zbmsw(this)'><span></span></label>"
+    end
+
+    # sets a relay from a switch, "<short address>_<relay number>_<1 or 0>". Returns false when
+    # there is no such relay or it could not be set
+    def switch_relay(switched)
+        var parts = string.split(switched,"_")
+        if size(parts) != 3 || ["0","1"].find(parts[2]) == nil
+            return false
+        end
+        var device_info = zbm_service.device_infos.find(int(parts[0]))
+        if device_info == nil
+            return false
+        end
+        var relay = zbm_service.find_relay(device_info,int(parts[1]))
+        if relay == nil
+            return false
+        end
+        return zbm_mqtt_bridge.set_relay(device_info,relay[0],relay[2],int(parts[2]))
+    end
+
+    # the state of every relay switch, "<short address>_<relay number>": 1, 0, or null when it is
+    # not known, for the devices page
+    def send_relay_states()
+        import webserver
+        var states = {}
+        for device_info : zbm_service.device_infos.iter()
+            for relay : zbm_service.device_relays(device_info)
+                var state = zbm_mqtt_bridge.relay_state(device_info,relay[0])
+                states[f"{device_info.shortaddr}_{relay[0]}"] = state == nil ? nil : (state ? 1 : 0)
+            end
+        end
+        webserver.content_open(200,"application/json")
+        webserver.content_send(json.dump(states))
+        webserver.content_close()
     end
 
     static def text(value)
@@ -2965,6 +3225,11 @@ class ZbmWebUI
         import webserver
         if !webserver.check_privileged_access() return nil end
 
+        # the devices page polls the states of its relay switches
+        if webserver.has_arg("rs")
+            return self.send_relay_states()
+        end
+
         var page = webserver.arg("p")
         if page != "schemas" && page != "settings"
             page = ""
@@ -2973,6 +3238,7 @@ class ZbmWebUI
         webserver.content_start("Zigbee Manager")
         webserver.content_send_style()
         webserver.content_send(self.style)
+        webserver.content_send(self.switch_style)
         webserver.content_send("<div style='padding:0 5px;text-align:center;'><h3><hr>Zigbee Manager<hr></h3></div>")
 
         if self.message != nil
@@ -3002,7 +3268,7 @@ class ZbmWebUI
     def send_devices()
         import webserver
         var pull_button = "<button name='act' value='pull'>Pull schemas</button>"
-        if zbm_schema_puller != nil
+        if ZbmSchemaPuller.current != nil
             pull_button = "<button type='button' disabled>Pulling schemas...</button>"
         end
         webserver.content_send("<form method='post' action='zbman' class='zt'><button name='act' value='poll'>Poll devices</button>" + pull_button + "</form><p></p>")
@@ -3012,10 +3278,14 @@ class ZbmWebUI
         if !size(devices)
             webserver.content_send("<p><small><i>No zigbee devices found yet.</i></small></p>")
         end
+        var switches = false
         for device_info : devices
-            self.send_device(device_info)
+            switches = self.send_device(device_info) || switches
         end
         webserver.content_send("</fieldset>")
+        if switches
+            webserver.content_send(self.devices_script)
+        end
     end
 
     def send_device(device_info)
@@ -3043,6 +3313,11 @@ class ZbmWebUI
 
         webserver.content_send(f"<div class='zd'><div class='zh'><b>{title}</b><span class='zs'{status_style}>{webserver.html_escape(status_text)}</span></div>")
         webserver.content_send("<table class='zi'>")
+        # a switch for each relay of an added device, first
+        var relays = zbm_service.device_relays(device_info)
+        for relay : relays
+            webserver.content_send(f"<tr><td>{self.text(relay[1])}</td><td>{self.relay_switch(device_info,relay[0])}</td></tr>")
+        end
         for row : [["Device",device_info.deviceid],
                    ["Manufacturer",device_info.manufacturer],
                    ["Model",device_info.model],
@@ -3087,6 +3362,7 @@ class ZbmWebUI
             webserver.content_send("<button class='zb bred' name='act' value='remove' onclick='return confirm(\"Remove this device?\")'>Remove</button>")
         end
         webserver.content_send("</div></form></div>")
+        return size(relays) > 0
     end
 
     def send_schemas()
@@ -3196,6 +3472,12 @@ class ZbmWebUI
         if !webserver.check_privileged_access() return nil end
 
         var action = webserver.arg("act")
+        if action == "relay"
+            # a switch on the devices page, answered with the relays' states rather than the page
+            self.switch_relay(webserver.arg("r"))
+            return self.send_relay_states()
+        end
+
         var page = ""
         try
             if ["add_schema","remove_schema","reset_schemas","add_mapping","remove_mapping"].find(action) != nil
@@ -3474,6 +3756,7 @@ class ZbmExtension
 
         tasmota.add_cmd('ZbmDevice',zbm_device)
         tasmota.add_cmd('ZbmDevices',zbm_devices)
+        tasmota.add_cmd('ZbmPower',zbm_power)
         tasmota.add_cmd('ZbmSchemas',zbm_schemas)
         tasmota.add_cmd('ZbmConfig',zbm_config)
         tasmota.add_cmd('ZbmPollDevices',zbm_poll_devices)
@@ -3501,9 +3784,9 @@ class ZbmExtension
 
         zbm_service.save_all_devices()
         ZbmStore.flush_all()
-        if zbm_schema_puller != nil
-            zbm_schema_puller.cancel()
-            zbm_schema_puller = nil
+        if ZbmSchemaPuller.current != nil
+            ZbmSchemaPuller.current.cancel()
+            ZbmSchemaPuller.current = nil
         end
         if zbm_web_ui != nil
             zbm_web_ui.unload()
@@ -3520,6 +3803,7 @@ class ZbmExtension
         zbm_state = nil
         tasmota.remove_cmd('ZbmDevice')
         tasmota.remove_cmd('ZbmDevices')
+        tasmota.remove_cmd('ZbmPower')
         tasmota.remove_cmd('ZbmSchemas')
         tasmota.remove_cmd('ZbmConfig')
         tasmota.remove_cmd('ZbmPollDevices')

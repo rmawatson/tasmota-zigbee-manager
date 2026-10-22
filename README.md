@@ -22,7 +22,7 @@ Primarily this was implemented to allow automatic discovery on Home Assistant wi
 
 ## Web UI
 
-The extension adds a **Zigbee Manager** button to the main page of the Tasmota web UI. It opens three pages, **Devices**, **Schemas** and **Settings**, which cover what the `Zbm` commands below do. When a web password is set the pages need admin access.
+The extension adds a **Zigbee Manager** button to the main page of the Tasmota web UI. It opens three pages, **Devices**, **Schemas** and **Settings**, which cover what the `Zbm` commands below do. When a web password is set the pages need admin access. The main page also gets a switch for every relay of the added devices, see [Main page](#main-page).
 
 Each page has **Main Menu** at the top, then a button for each page with the current one highlighted. After any action the page reloads with a message at the top, green when it worked, or red with the reason when it did not.
 
@@ -41,6 +41,7 @@ If the repository has no schema for the device, see [Creating a schema](#creatin
 
 Every device found on the bridge is listed, named devices first. Each shows its short address, manufacturer, model, key (`manufacturer:model`), the schema mapped to that key, link quality, battery level (`-` for mains powered devices) and when the bridge last heard from it, with its status in the top right.
 
+- An added device with relays has a switch for each one at the top of its details, named as in its schema (`Power` in the schemas of this repository). It shows the relay's state, refreshed every two seconds while the page is open, and is dimmed until the device has reported a state. Clicking it switches the relay on or off, as `ZbmPower` does.
 - **Rename** (or **Set name** for an unnamed device) names the device with `ZbName`. When an added device is renamed, here or with `ZbName` in the console (noticed at the next poll), its MQTT topics move to the new name and it is reported Offline under the old one.
 - **Add** (`ZbmAddDevice`) is shown for every device that is not added. A name typed into the box is set first, so an unnamed device can be named and added in one go. Add also clears the errors left by an earlier attempt, so it can be pressed again once a missing schema has been added.
 - **Reset** (`ZbmResetDevice`) clears the device's status. **Remove** (`ZbmRemoveDevice`) removes it, after asking. After either, its messages are no longer processed and its relays no longer take commands, until it is added again.
@@ -97,6 +98,12 @@ Changes the values otherwise set with `ZbmConfig`. **Reset settings** puts them 
 | Key devices by manufacturer:model | `auto_key_devices` | on | Needed to use the schemas in this repository |
 | Log level | `log_level` | Info | None, Error, Info or Debug. Use Debug when looking into a problem |
 
+### Main page
+
+<img src="docs/images/main-page.png" alt="Relay switches on Tasmota's main page" width="420">
+
+Tasmota's main page has a switch for every relay of the added devices, after Tasmota's own Zigbee section. A switch is named after its device, and after the relay as well when the device has more than one. Tasmota refreshes this part of the page every few seconds, so a relay switched another way, from Home Assistant or the device's own button, shows its new state, and a state that is not known yet is dimmed. Clicking a switch sets the relay on or off. Like Tasmota's own relay buttons, the switches work for anyone who can open the main page, also with `WebServer 1`, where the Zigbee Manager pages are not available.
+
 ### Tasmota Style
 
 These pages, and the rest of the Tasmota web UI, can be restyled with [Tasmota Style](https://github.com/rmawatson/tasmota-style),
@@ -119,14 +126,16 @@ When a new zigbee message arrives, the device it came from is looked up. If it i
 
 | Category | Published to | Value |
 |---|---|---|
-| `relays` | `stat/<device_name>/POWER<n>` and `stat/<device_name>/RESULT` | A number or true/false becomes `ON`/`OFF` |
+| `relays` | `stat/<device_name>/POWER<n>` and `stat/<device_name>/RESULT` | On or off, as true/false, a number (0 is off) or the text `ON`/`OFF` in any case, becomes `ON`/`OFF`. Anything else is not published, and an error is logged |
 | `switches` | `tele/<device_name>/SENSOR` | A number or true/false becomes `ON`/`OFF` |
 | `sensors` | `tele/<device_name>/SENSOR`, under the entity's `format_category` when it has one | As returned |
 | `states` | `tele/<device_name>/STATE` | As returned |
 
 The `SENSOR` and `STATE` messages hold the latest value of every entity that has had one since the extension started, not only the values from the last zigbee message. They are retained when Tasmota's `SensorRetain` (for `SENSOR`) or `StateRetain` (for `STATE`) is on, so turn these on if Home Assistant should show the last values straight after it restarts.
 
-In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`).
+In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, in any case, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`). The `ZbmPower` command and the switches in the [web UI](#web-ui) set relays the same way.
+
+Whatever sets a relay, its `set_value` is only given 1 or 0, and turns that into whatever the device takes, and its `parse_value` turns what the device reports back into on or off. The words used over mqtt, `ON`, `OFF` and `TOGGLE`, are the extension's own, the ones its discovery message gives Home Assistant. A device that takes `'a'` for on and `'b'` for off has `"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Mode': value ? 'a' : 'b'})"` and `"parse_value": "/device_info,attr_list -> attr_list['Mode'] == 'a'"`.
 
 `request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. For battery operated devices that are not actively listening this will end up doing nothing.
 
@@ -238,14 +247,14 @@ Assuming the device is connected to the zigbee bridge,
     }
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
-All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value from the `cmnd` topic for `set_value` (1 for `ON`, 0 for `OFF`, see [How it works](#how-it-works) for `TOGGLE`), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
+All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
 - In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
-`parse_value` should return the extracted value, formatted as required<br/>
-`"parse_value": "/device_info,attr_list -> attr_list['Power'] ? 'ON' : 'OFF'"`<br/>
-- For a sensor no further callbacks are necessary - just a `format_category` in the case of HA. For a relay, `set_value` is needed to write a value from the cmnd topic's mqtt payload. It can use the provided `zb_write` helper function to write this to the relay device.
-`"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value ? 1 : 0})"`<br/>
+`parse_value` should return the extracted value. For a relay this is its state, on or off, here the attribute itself, 1 or 0, which is published as `ON` or `OFF`<br/>
+`"parse_value": "/device_info,attr_list -> attr_list['Power']"`<br/>
+- For a sensor no further callbacks are necessary - just a `format_category` in the case of HA. For a relay, `set_value` is needed to switch it. It is given 1 for on and 0 for off, from an mqtt command, `ZbmPower` or a switch in the web UI, and writes what the device takes, here the same 1 or 0, with the provided `zb_write` helper function.
+`"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value})"`<br/>
 Note: it may require some experimentation in the console using Tasmota's `ZbSend` to check your relay is working. the `zb_write` `zb_read` functions above are just wrappers around `ZbSend`
 - Optionally you can add `request_value` to have Zbm request the latest relay status on startup for this device.
 - Your schema should look as below.
@@ -258,8 +267,8 @@ Note: it may require some experimentation in the console using Tasmota's `ZbSend
                 "relays": {
                     "MyRelay": {
                         "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
-                        "parse_value": "/device_info,attr_list -> attr_list['Power'] ? 'ON' : 'OFF'",
-                        "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value ? 1 : 0})",
+                        "parse_value": "/device_info,attr_list -> attr_list['Power']",
+                        "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value})",
                         "request_value": "/device_info,ctx -> ctx.zb_read(device_info,{'Power':1})"
                     }
                 }
@@ -285,8 +294,8 @@ Note: it may require some experimentation in the console using Tasmota's `ZbSend
                 "relays": {
                     "MyRelay": {
                         "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
-                        "parse_value": "/device_info,attr_list -> attr_list['Power'] ? 'ON' : 'OFF'",
-                        "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value ? 1 : 0})",
+                        "parse_value": "/device_info,attr_list -> attr_list['Power']",
+                        "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value})",
                         "request_value": "/device_info,ctx -> ctx.zb_read(device_info,{'Power':1})"
                     }
                 }
@@ -314,9 +323,9 @@ A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<devi
 | Function | Called | Arguments | Returns |
 |---|---|---|---|
 | `has_value` | For every message from the device | `device_info, attr_list, ctx` | Whether the message has a value for this entity. Without `has_value`, `parse_value` is called for every message |
-| `parse_value` | When `has_value` returned true | `device_info, attr_list, ctx` | The value to publish, `nil` is published as `null` |
+| `parse_value` | When `has_value` returned true | `device_info, attr_list, ctx` | The value to publish, `nil` is published as `null`. For a relay, on or off, see [How it works](#how-it-works) |
 | `reset_value` | Straight after `parse_value` | `device_info, attr_list, ctx` | A second value, published straight after the first |
-| `set_value` | Relays only, when a command arrives on `cmnd/<device_name>/Power<n>` | `device_info, value, ctx` | Nothing. `value` is 1 for `ON` and 0 for `OFF`, and for `TOGGLE` the opposite of the relay's last state |
+| `set_value` | Relays only, when the relay is set, by a command on `cmnd/<device_name>/Power<n>`, `ZbmPower` or a switch in the web UI | `device_info, value, ctx` | Nothing. `value` is 1 for on and 0 for off, `TOGGLE` is the opposite of the relay's last state |
 | `request_value` | When the device is configured, see [How it works](#how-it-works) | `device_info, ctx` | Nothing |
 
 A relay must have `set_value`, otherwise the device is marked *Schema compile failed* when its first message arrives.
@@ -479,6 +488,10 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 > ### ZbmDevice (ro)
 >
 > Shows the details of one device, by id or by name like `ZbmRemoveDevice`, `ZbmDevice 0x120E`, see [Creating a schema](#creating-a-schema). It answers like `ZbmDevices`, with that device only
+
+> ### ZbmPower (rw)
+>
+> Sets a relay of an added device, like Tasmota's `Power` command and the device's `cmnd/<device_name>/Power<n>` topic, `ZbmPower<n> <device>,<value>`. `<n>` is the relay's number, 1 when it is left off, and the device is its id or its name, such as `ZbmPower Coffee Machine,ON`, `ZbmPower1 0x1C88,TOGGLE` or `ZbmPower2 {"device":"Stairs","power":"OFF"}`. The value is `ON`, `OFF` or `TOGGLE`, or `1`, `0`, `TRUE`, `FALSE` or `2`, in any case. Without a value it reports the relay's state. It answers `{"ZbmPower1":{"devicename":"Coffee Machine","deviceid":"0x1C88","state":"ON"}}`, with the state that was set until the device reports it, and `null` while the state is not known. It answers `Error` when the device is not found or not added, has no relay `<n>`, or its `set_value` failed
 
 > ### ZbmSchemas (ro)
 >
