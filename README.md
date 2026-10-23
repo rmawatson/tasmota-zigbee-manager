@@ -102,7 +102,9 @@ Changes the values otherwise set with `ZbmConfig`. **Reset settings** puts them 
 
 <img src="docs/images/main-page.png" alt="Relay switches on Tasmota's main page" width="420">
 
-Tasmota's main page has a switch for every relay of the added devices, after Tasmota's own Zigbee section. A switch is named after its device, and after the relay as well when the device has more than one. Tasmota refreshes this part of the page every few seconds, so a relay switched another way, from Home Assistant or the device's own button, shows its new state, and a state that is not known yet is dimmed. Clicking a switch sets the relay on or off. Like Tasmota's own relay buttons, the switches work for anyone who can open the main page, also with `WebServer 1`, where the Zigbee Manager pages are not available.
+In Tasmota's own Zigbee list on the main page, an added device has a line with a switch for each of its relays, below its other lines, named as the relay is in its schema. Tasmota refreshes the list every few seconds, so a relay switched another way, from Home Assistant or the device's own button, shows its new state, and a state that is not known yet is dimmed. Clicking a switch sets the relay on or off. Like Tasmota's own relay buttons, the switches work for anyone who can open the main page, also with `WebServer 1`, where the Zigbee Manager pages are not available.
+
+The lines are added through the hook Tasmota's Zigbee list has for extensions, `web_device_status`. A relay the list does not show, as on a Tasmota without the hook, gets its switch after the list instead, named after its device.
 
 ### Tasmota Style
 

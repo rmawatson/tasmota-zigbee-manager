@@ -3023,6 +3023,7 @@ class ZbmWebUI
         ".zsw>input:checked+span{background:var(--c_btn);}"
         ".zsw>input:checked+span:before{transform:translateX(1.1em);}"
         ".zsw.zu>span{opacity:0.4;}"
+        ".zbl{display:flex;justify-content:space-between;align-items:center;}"
         "</style>"
 
     # on the main page a click is sent with tasmota's own refresh, la(), whose answer has the
@@ -3047,11 +3048,15 @@ class ZbmWebUI
     var routes_added
     var message
     var draft     # a schema that was rejected, shown again so it can be corrected
+    var listed    # shortaddr -> true for the devices web_device_status put switches in tasmota's list for
 
     def init()
         import webserver
         self.routes_added = false
+        self.listed = {}
         tasmota.add_driver(self)
+        # for web_device_status, from tasmota's own zigbee list on the main page
+        zigbee.add_handler(self)
         # tasmota only sends web_add_handler once, when the web server starts. if the
         # extension is started later, from the extensions page, the server is already
         # running and the pages are added straight away
@@ -3063,6 +3068,7 @@ class ZbmWebUI
     def unload()
         import webserver
         tasmota.remove_driver(self)
+        zigbee.remove_handler(self)
         if self.routes_added
             self.routes_added = false
             try
@@ -3091,18 +3097,40 @@ class ZbmWebUI
         webserver.content_send(self.switch_style + self.main_script)
     end
 
-    # a switch for every relay of the added devices, in the sensor table of the main page, which
-    # tasmota refreshes every few seconds, so they follow the relays' states. They come after
-    # tasmota's own zigbee devices and buttons, under a line as tasmota puts between sensors
+    # tasmota's own zigbee list on the main page calls this after the rows of each device. A
+    # switch for each of its relays goes in a line below them, like tasmota's own lines, so it
+    # is refreshed with the list every few seconds and follows the relays' states
+    def web_device_status(event_type,frame,attr_list,shortaddr)
+        var device_info = zbm_service.device_infos.find(shortaddr)
+        if device_info == nil
+            return
+        end
+        var rows = ""
+        for relay : zbm_service.device_relays(device_info)
+            rows += f"<tr class='htr'><td colspan=4><div class='zbl'>&#9478; {self.text(relay[1])}{self.relay_switch(device_info,relay[0])}</div></td></tr>"
+        end
+        if size(rows)
+            self.listed[shortaddr] = true
+            tasmota.web_send(rows)
+        end
+    end
+
+    # a switch for every relay the zigbee list did not show, as on a tasmota whose list does not
+    # call web_device_status, in the sensor table after it, under a line as tasmota puts between
+    # sensors. web_sensor comes after the zigbee list in each refresh
     def web_sensor()
         var rows = ""
         for device_info : self.sorted_devices()
+            if self.listed.contains(device_info.shortaddr)
+                continue
+            end
             var relays = zbm_service.device_relays(device_info)
             for relay : relays
                 var label = size(relays) > 1 ? f"{device_info.name} {relay[1]}" : device_info.name
                 rows += "{s}" + self.text(label) + "{m}" + self.relay_switch(device_info,relay[0]) + "{e}"
             end
         end
+        self.listed = {}
         if size(rows)
             tasmota.web_send("<tr><td colspan=2 style='font-size:2px'><hr></td></tr>" + rows)
         end
