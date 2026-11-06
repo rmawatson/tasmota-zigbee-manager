@@ -1525,8 +1525,30 @@ class ZbmState : ZbmNotify
         "auto_remove_devices":true,
         "auto_name_devices":false,
         "auto_key_devices":true,
-        "log_level":2
+        "log_level":2,
+        # the folder ZbmPullSchemas downloads index.json, the manifests and the schemas from
+        "schema_url":"https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
     }
+
+    # url as the schema_url setting keeps it, without the slashes at its end so a file name
+    # can follow a slash, and the default when it is empty. nil when webclient cannot fetch
+    # from it
+    static def valid_schema_url(url)
+        url = url != nil ? strip(str(url)) : ""
+        var length = size(url)
+        while length > 0 && url[length-1] == "/"
+            length -= 1
+        end
+        if length == 0
+            return _class.config_defaults["schema_url"]
+        end
+        url = url[0..length-1]
+        var lower = string.tolower(url)
+        if !string.startswith(lower,"http://") && !string.startswith(lower,"https://")
+            return nil
+        end
+        return url
+    end
 
     def init()
 
@@ -2624,7 +2646,7 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
         elif ttype == "real"
             return real(argv)
         elif ttype == "string"
-            return string(argv)
+            return str(argv)
         end
     end
 
@@ -2644,6 +2666,13 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
     for arg : parsed_args
         if arg.name == "auto_poll_devices_period" && arg.value != nil && (arg.value < 1 || arg.value > 3600)
             return log_cmnd_error(cmmd_name,f"auto_poll_devices_period must be from 1 to 3600 seconds, got {arg.value}")
+        end
+        if arg.name == "schema_url" && arg.value != nil
+            var url = ZbmState.valid_schema_url(arg.value)
+            if url == nil
+                return log_cmnd_error(cmmd_name,f"schema_url must start with http:// or https://, got '{arg.value}'")
+            end
+            arg.value = url
         end
     end
 
@@ -2709,9 +2738,9 @@ class ZbmSchemaPuller
     # and zigbee while the files download. the schemas are always downloaded, even when
     # already in the registry, as the repository may have newer versions. each file
     # replaces the schemas it defines as soon as it has been downloaded, then the added
-    # devices using them are configured again so the changes take effect.
+    # devices using them are configured again so the changes take effect. the files come
+    # from the schema_url setting, this repository's main branch unless it was changed
 
-    static var url_base = "https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
     static var timer_id = "zbm_pull_schemas"
     static var step_delay = 100
     static var retry_delay = 2000
@@ -2725,6 +2754,7 @@ class ZbmSchemaPuller
     static var current = nil
 
     var log
+    var url
     var keys
     var manifests
     var pending
@@ -2738,6 +2768,9 @@ class ZbmSchemaPuller
 
     def init(keys)
         self.log = ZbmLogger("pull_schemas")
+        # taken when the pull starts, the setting changing during a pull does not mix
+        # files from two places
+        self.url = zbm_state.schema_url
         self.keys = []
         for key : keys
             if self.keys.find(key) == nil
@@ -2756,7 +2789,7 @@ class ZbmSchemaPuller
 
     def start()
         self.running = true
-        self.log.info(f"pulling schemas for {self.keys}")
+        self.log.info(f"pulling schemas for {self.keys} from {self.url}")
         self.next(/-> self.read_index())
     end
 
@@ -2797,7 +2830,7 @@ class ZbmSchemaPuller
     end
 
     def fetch(file_name)
-        var url = f"{self.url_base}/{file_name}"
+        var url = f"{self.url}/{file_name}"
         self.log.debug(f"requesting {url}")
 
         var client = webclient()
@@ -2980,7 +3013,7 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
     var puller = ZbmSchemaPuller(request_list)
     ZbmSchemaPuller.current = puller
     puller.start()
-    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Keys":puller.keys}}))
+    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Url":puller.url,"Keys":puller.keys}}))
 end
 
 class ZbmWebUI
@@ -2999,6 +3032,7 @@ class ZbmWebUI
         ["auto_remove_devices","Remove devices that leave","Drop devices from the list once they are no longer paired with the bridge."],
         ["auto_name_devices","Name devices automatically","Name unnamed devices manufacturer-model when they are added. Not recommended."],
         ["auto_key_devices","Key devices by manufacturer:model","The schemas in the repository are mapped from these keys."],
+        ["schema_url","Schema location","Where Pull schemas downloads index.json and the schemas from. Replace main with another branch, or give a fork or your own server. Empty for this repository's main branch."],
         ["log_level","Log level",nil]
     ]
     static var log_levels = ["None","Error","Info","Debug"]
@@ -3496,6 +3530,9 @@ class ZbmWebUI
                     options += f"<option value='{level}'{selected}>{self.log_levels[level]}</option>"
                 end
                 webserver.content_send(f"<p><b>{setting[1]}</b><br><select name='{key}'>{options}</select></p>")
+            elif key == "schema_url"
+                var placeholder = webserver.html_escape(ZbmState.config_defaults[key])
+                webserver.content_send(f"<p><b>{setting[1]}</b><br><input type='url' name='{key}' value='{webserver.html_escape(value)}' placeholder='{placeholder}'><br><small>{setting[2]}</small></p>")
             else
                 var checked = value ? " checked" : ""
                 webserver.content_send(f"<p><label><input type='checkbox' name='{key}'{checked}><b>{setting[1]}</b></label><br><small>{setting[2]}</small></p>")
@@ -3633,7 +3670,7 @@ class ZbmWebUI
         var response = tasmota.cmd("ZbmPullSchemas")
         var result = isinstance(response,map) ? response.find("ZbmPullSchemas") : nil
         if isinstance(result,map) && result.find("Status") == "Started"
-            return ["Pulling schemas, the result is shown in the console",true]
+            return [f"Pulling schemas from {result.find('Url')}, the result is shown in the console",true]
         elif result == "Done"
             return ["No devices with a key to pull schemas for",true]
         end
@@ -3764,10 +3801,14 @@ class ZbmWebUI
 
         var period = int(webserver.arg("auto_poll_devices_period"))
         var log_level = int(webserver.arg("log_level"))
+        # kept when the form has no such field, as a page loaded before an update
+        var schema_url = webserver.has_arg("schema_url") ? ZbmState.valid_schema_url(webserver.arg("schema_url")) : zbm_state.schema_url
         if period < 1 || period > 3600
             return ["The poll period must be between 1 and 3600 seconds",false]
         elif log_level < 0 || log_level >= size(self.log_levels)
             return ["Unknown log level",false]
+        elif schema_url == nil
+            return ["The schema location must start with http:// or https://",false]
         end
 
         for setting : self.settings
@@ -3777,6 +3818,8 @@ class ZbmWebUI
                 value = period
             elif key == "log_level"
                 value = log_level
+            elif key == "schema_url"
+                value = schema_url
             end
             zbm_state.setmember(key,value)
         end

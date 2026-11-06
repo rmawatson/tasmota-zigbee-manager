@@ -46,7 +46,7 @@ Every device found on the bridge is listed, named devices first. Each shows its 
 - **Add** (`ZbmAddDevice`) is shown for every device that is not added. A name typed into the box is set first, so an unnamed device can be named and added in one go. Add also clears the errors left by an earlier attempt, so it can be pressed again once a missing schema has been added.
 - **Reset** (`ZbmResetDevice`) clears the device's status. **Remove** (`ZbmRemoveDevice`) removes it, after asking. After either, its messages are no longer processed and its relays no longer take commands, until it is added again.
 - **Poll devices** (`ZbmPollDevices`) looks for devices joining or leaving the bridge now.
-- **Pull schemas** (`ZbmPullSchemas`) downloads the schemas for every device from this repository, including devices that are already added, as their schemas may have been updated. The button shows *Pulling schemas...* until it has finished.
+- **Pull schemas** (`ZbmPullSchemas`) downloads the schemas for every device from the [schema location](#settings), this repository's `main` branch unless it was changed, including devices that are already added, as their schemas may have been updated. The message at the top names the location, and the button shows *Pulling schemas...* until it has finished.
 
 When a device is not added, a hint below its details says what to do. The statuses are
 
@@ -96,7 +96,10 @@ Changes the values otherwise set with `ZbmConfig`. **Reset settings** puts them 
 | Remove devices that leave | `auto_remove_devices` | on | Drop devices that are no longer paired with the bridge from the list |
 | Name devices automatically | `auto_name_devices` | off | Name unnamed devices `manufacturer-model N` when they are added. Not recommended |
 | Key devices by manufacturer:model | `auto_key_devices` | on | Needed to use the schemas in this repository |
+| Schema location | `schema_url` | this repository's `main` branch | Where **Pull schemas** downloads `index.json` and the schemas from. Empty puts back the default |
 | Log level | `log_level` | Info | None, Error, Info or Debug. Use Debug when looking into a problem |
+
+The schema location is the address of the folder holding `index.json`, by default `https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema`. To pull from another branch replace `main` with its name, such as `.../refs/heads/develop/schema`, or give the same folder in a fork or on a server of your own. It must start with `http://` or `https://`, and a slash at its end is left out. A pull keeps the location it started with, a change made while it runs applies from the next pull.
 
 ### Main page
 
@@ -306,7 +309,7 @@ Note: it may require some experimentation in the console using Tasmota's `ZbSend
     }
     ```
 - The schema can now be added to the registry by pasting it into **Upload a schema** on the [Schemas page](#schemas), which checks it and tells you what is wrong if it is rejected, or with `ZbmAddSchema <paste_the_json>`
-- Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manifest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbmPullSchemas` should be all that is required to set up your device.
+- Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manifest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbmPullSchemas` should be all that is required to set up your device. To pull it before the PR is merged, set the [schema location](#settings) to the branch it is on.
 
 ## Schema functions
 
@@ -521,6 +524,9 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 > `auto_key_devices`<br/>
 > Enable/disable generating the key used to look up the device's schema, of the form `manufacturer:model`. A key of your own can be given with `ZbmAddDevice devicekey=<key>`, for example to map two identical devices to different schemas. With this off, every device needs one. `default=true`
 >
+> `schema_url`<br/>
+> The address of the folder `ZbmPullSchemas` downloads `index.json`, the manifests and the schemas from, see [Settings](#settings), such as `ZbmConfig schema_url=https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/develop/schema`. `ZbmConfig {"schema_url":""}` puts back the default `default=https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema`
+>
 > `log_level`<br/>
 > The log level of the zbm extension, 0 none, 1 error, 2 info or 3 debug. Use 3 when debugging any issue, errors in schema functions are only logged at 3 `default=2`
 
@@ -592,9 +598,9 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 
 > ### ZbmPullSchemas (wo)
 >
-> For all devices attached to the zigbee bridge, attempts to download valid schemas and mappings from the github repository for them based on the device key (or generated key if `auto_key_devices=true`). For devices that have schemas in the repository, assuming they are all named with `ZbName` already, with default settings this would be all that is required to make them discoverable (and in the case of home assistant they would show up as devices in the tasmota integration)
+> For all devices attached to the zigbee bridge, attempts to download valid schemas and mappings for them from the schema location (`schema_url`, this repository's `main` branch by default) based on the device key (or generated key if `auto_key_devices=true`). For devices that have schemas in the repository, assuming they are all named with `ZbName` already, with default settings this would be all that is required to make them discoverable (and in the case of home assistant they would show up as devices in the tasmota integration)
 >
-> The download runs in the background, one file at a time, so the command returns straight away with `{"ZbmPullSchemas":{"Status":"Started","Keys":[...]}}`. Schemas are downloaded for every device, including devices that are already added, as the repository may have newer versions, together with the schemas they include. Each downloaded schema replaces the one in the registry as a whole as soon as it arrives (a schema you added yourself under the same name as one in the repository is overwritten), and devices that are already added are configured again so the changes take effect. Failed requests are retried. Once finished the result is logged and published to `stat/<topic>/RESULT`, either `{"ZbmPullSchemas":{"Status":"Done","Schemas":[...],"NotFound":[...]}}` or `{"ZbmPullSchemas":{"Status":"Failed","Error":"...","Schemas":[...]}}`, where `Schemas` lists the schemas replaced before the failure.
+> The download runs in the background, one file at a time, so the command returns straight away with `{"ZbmPullSchemas":{"Status":"Started","Url":"...","Keys":[...]}}`, where `Url` is the location it downloads from. Schemas are downloaded for every device, including devices that are already added, as the repository may have newer versions, together with the schemas they include. Each downloaded schema replaces the one in the registry as a whole as soon as it arrives (a schema you added yourself under the same name as one in the repository is overwritten), and devices that are already added are configured again so the changes take effect. Failed requests are retried. Once finished the result is logged and published to `stat/<topic>/RESULT`, either `{"ZbmPullSchemas":{"Status":"Done","Schemas":[...],"NotFound":[...]}}` or `{"ZbmPullSchemas":{"Status":"Failed","Error":"...","Schemas":[...]}}`, where `Schemas` lists the schemas replaced before the failure.
 
 ## To do/Notes
 Entities in `commands` (see `schema/sonoff_minir2.json`) are accepted, and their `request_value` is called, but their values are not published and nothing is subscribed to for their `set_value`. Home Assistant doesn't really have a no code/yaml way to call them, but it would still be nice to listen to the topics to configure things such as TurboMode on the sonoff_minir2.
