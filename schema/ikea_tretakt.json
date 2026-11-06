@@ -11,8 +11,8 @@
             "relays": {
                 "Power": {
                     "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
-                    "parse_value": "/device_info,attr_list -> attr_list['Power'] ? 'ON' : 'OFF'",
-                    "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value ? 1 : 0})",
+                    "parse_value": "/device_info,attr_list -> attr_list['Power']",
+                    "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Power':value})",
                     "request_value": "/device_info,ctx -> ctx.zb_read(device_info,{'Power':1})"
                 }
             }

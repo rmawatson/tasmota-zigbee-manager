@@ -1,0 +1,57 @@
+{
+    "version": 1,
+    "mappings": {
+        "HEIMAN:HS1SA-E-PLUS": "heiman_hs1sa-e-plus"
+    },
+    "schemas": {
+        "heiman_hs1sa-e-plus": {
+            "include": [
+                "link_quality",
+                "battery_percentage"
+            ],
+            "config": {
+                "battery": 1,
+                "deepsleep": 1
+            },
+            "switches": {
+                "Smoke": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('ZoneStatusChange') || attr_list.contains('ZoneStatus')",
+                    "parse_value": "/device_info,attr_list -> ((attr_list.contains('ZoneStatusChange') ? attr_list['ZoneStatusChange'] : attr_list['ZoneStatus']) & 1) != 0"
+                },
+                "BatteryLow": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('ZoneStatusChange') || attr_list.contains('ZoneStatus')",
+                    "parse_value": "/device_info,attr_list -> ((attr_list.contains('ZoneStatusChange') ? attr_list['ZoneStatusChange'] : attr_list['ZoneStatus']) & 8) != 0"
+                },
+                "Test": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('ZoneStatusChange') || attr_list.contains('ZoneStatus')",
+                    "parse_value": "/device_info,attr_list -> ((attr_list.contains('ZoneStatusChange') ? attr_list['ZoneStatusChange'] : attr_list['ZoneStatus']) & 256) != 0"
+                },
+                "Fault": {
+                    "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0002')) == 'int'",
+                    "parse_value": "/device_info,attr_list -> (attr_list['FC90/0002'] & 15) != 0"
+                },
+                "Muted": {
+                    "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0009')) == 'int'",
+                    "parse_value": "/device_info,attr_list -> (attr_list['FC90/0009'] & 63) != 0"
+                }
+            },
+            "sensors": {
+                "Temperature": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('Temperature')",
+                    "parse_value": "/device_info,attr_list -> real(attr_list['Temperature'])",
+                    "format_category": "Sensor"
+                },
+                "SmokeLevel": {
+                    "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0016')) == 'int'",
+                    "parse_value": "/device_info,attr_list -> attr_list['FC90/0016'] / 100.0",
+                    "format_category": "Sensor"
+                },
+                "ChamberContamination": {
+                    "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0017')) == 'int'",
+                    "parse_value": "/device_info,attr_list -> attr_list['FC90/0017'] == 0 ? 'Normal' : (attr_list['FC90/0017'] == 1 ? 'Light' : (attr_list['FC90/0017'] == 2 ? 'Medium' : (attr_list['FC90/0017'] == 3 ? 'Critical' : str(attr_list['FC90/0017']))))",
+                    "format_category": "Sensor"
+                }
+            }
+        }
+    }
+}
