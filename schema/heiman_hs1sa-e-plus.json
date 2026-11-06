@@ -18,25 +18,29 @@
                     "index": 1,
                     "has_value": "/device_info,attr_list -> attr_list.contains('ZoneStatusChange') || attr_list.contains('ZoneStatus')",
                     "parse_value": "/device_info,attr_list -> ((attr_list.contains('ZoneStatusChange') ? attr_list['ZoneStatusChange'] : attr_list['ZoneStatus']) & 256) != 0",
-                    "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,value == 1 ? '0500!02/0101' : '0500!01')"
+                    "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,value == 1 ? '0500!02/0101' : '0500!01')",
+                    "request_value": "/device_info,ctx -> ctx.zb_read(device_info,{'ZoneStatus':true})"
                 },
                 "TemporaryMute": {
                     "index": 2,
                     "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0008')) == 'int'",
                     "parse_value": "/device_info,attr_list -> attr_list['FC90/0008'] != 0",
-                    "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/0008%uint8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]}) end"
+                    "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/0008%uint8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]}) end",
+                    "request_value": "/device_info,ctx -> ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]})"
                 },
                 "Siren": {
                     "index": 3,
                     "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0012')) == 'int'",
                     "parse_value": "/device_info,attr_list -> attr_list['FC90/0012'] != 0",
-                    "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/0012%enum8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0012]}) end"
+                    "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/0012%enum8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0012]}) end",
+                    "request_value": "/device_info,ctx -> ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0012]})"
                 },
                 "HeartbeatIndicator": {
                     "index": 4,
                     "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/1004')) == 'int'",
                     "parse_value": "/device_info,attr_list -> attr_list['FC90/1004'] != 0",
-                    "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/1004%uint8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x1004]}) end"
+                    "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/1004%uint8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x1004]}) end",
+                    "request_value": "/device_info,ctx -> ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x1004]})"
                 }
             },
             "switches": {
