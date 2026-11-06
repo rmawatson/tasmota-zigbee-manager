@@ -75,6 +75,15 @@
             "includes": [
                 "link_quality"
             ]
+        },
+        "heiman_hs1sa-e-plus": {
+            "mappings": [
+                "HEIMAN:HS1SA-E-PLUS"
+            ],
+            "includes": [
+                "link_quality",
+                "battery_percentage"
+            ]
         }
     },
     "next": null
