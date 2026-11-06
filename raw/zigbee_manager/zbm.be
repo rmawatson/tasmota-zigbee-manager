@@ -331,6 +331,16 @@ def zb_read(device_info,payload,endpoint)
     zb_send(zb_payload)
 end
 
+# ZbSend to the device with any of its fields, for what zb_write and zb_read cannot send, such
+# as a manufacturer's own attribute, which needs its code: {'Manuf':0x120B,'Write':{...}}
+def zb_send_device(device_info,fields)
+    var zb_payload = {"Device":device_info.deviceid}
+    for key : fields.keys()
+        zb_payload[key] = fields[key]
+    end
+    zb_send(zb_payload)
+end
+
 
 
 def zb_timestr(time_type)
@@ -356,7 +366,8 @@ def zb_invoke_handler(callback_name,components,device_info,*args)
 
         var context = ZbmStruct({
             "zb_write":_make_call_fn(zb_write),
-            "zb_read":_make_call_fn(zb_read)})        
+            "zb_read":_make_call_fn(zb_read),
+            "zb_send":_make_call_fn(zb_send_device)})
         try
             return call(components[callback_name].fn,device_info,args + [context])
         except .. as e,m
@@ -1367,6 +1378,12 @@ class ZbmMqttBridge
             end
         end
 
+        # home assistant names each relay from the friendly name at its position, the first
+        # after the device when it is the device's name, and a relay without one "switch <n>".
+        # A device with more than one relay has them named as in its schema
+        var friendly_names = [device_info.name]
+        var relay_names = {}
+
         # the topics from the last time are dropped, the device's name or its relays may
         # have changed, and a second listener would send every command to the device twice
         self.unsubscribe_device(device_info)
@@ -1383,6 +1400,7 @@ class ZbmMqttBridge
                     relays.push(0)
                 end
                 relays[relay_number-1] = 1
+                relay_names[relay_number] = relay_name
 
                 if relay_components.contains("set_value")
                     var topic = f"cmnd/{device_info.name}/Power{relay_number}"
@@ -1400,6 +1418,13 @@ class ZbmMqttBridge
 
         end
 
+        if size(relay_names) > 1
+            friendly_names = []
+            for relay_number : 1..size(relays)
+                friendly_names.push(relay_names.find(relay_number))
+            end
+        end
+
         if compiled_schema.schema.contains("switches")
             for switch_name : compiled_schema.schema["switches"].keys()
                 switches.push(1)
@@ -1413,7 +1438,7 @@ class ZbmMqttBridge
             json.dump({
                 "ip": state_map["IPAddress"],
                 "dn": device_info.name,
-                "fn": [device_info.name],
+                "fn": friendly_names,
                 "hn": state_map["Hostname"],
                 "mac": device_info.macaddr,
                 "md": device_info.model,

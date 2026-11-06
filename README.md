@@ -138,7 +138,7 @@ When a new zigbee message arrives, the device it came from is looked up. If it i
 
 The `SENSOR` and `STATE` messages hold the latest value of every entity that has had one since the extension started, not only the values from the last zigbee message. They are retained when Tasmota's `SensorRetain` (for `SENSOR`) or `StateRetain` (for `STATE`) is on, so turn these on if Home Assistant should show the last values straight after it restarts.
 
-In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, in any case, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`). The `ZbmPower` command and the switches in the [web UI](#web-ui) set relays the same way.
+In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, in any case, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`). The `ZbmPower` command and the switches in the [web UI](#web-ui) set relays the same way. In Home Assistant a device's only relay is named after the device, and the relays of a device with more than one are named as in its schema, such as *SelfTest* and *Siren* in `schema/heiman_hs1sa-e-plus.json`.
 
 Whatever sets a relay, its `set_value` is only given 1 or 0, and turns that into whatever the device takes, and its `parse_value` turns what the device reports back into on or off. The words used over mqtt, `ON`, `OFF` and `TOGGLE`, are the extension's own, the ones its discovery message gives Home Assistant. A device that takes `'a'` for on and `'b'` for off has `"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Mode': value ? 'a' : 'b'})"` and `"parse_value": "/device_info,attr_list -> attr_list['Mode'] == 'a'"`.
 
@@ -252,7 +252,7 @@ Assuming the device is connected to the zigbee bridge,
     }
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
-All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
+All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending requests to the zigbee device, `ctx.zb_write`, `ctx.zb_read` and `ctx.zb_send`.
 - In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
@@ -337,7 +337,8 @@ A relay must have `set_value`, otherwise the device is marked *Schema compile fa
 
 - `device_info` is the device, with `device_info.name`, `device_info.deviceid` (`0x120E`), `device_info.shortaddr` (as a number), `device_info.manufacturer`, `device_info.model`, `device_info.key`, `device_info.lqi` and `device_info.battery`.
 - `attr_list` is a map of the attributes in the zigbee message, as shown in the `attributes_final` debug line, such as `{"Power":1,"Endpoint":1,"LinkQuality":149}`. Read it with `attr_list.contains('Power')`, `attr_list['Power']`, or `attr_list.find('Power')`, which gives `nil` rather than an error when the attribute is missing.
-- `ctx` has two helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. Both take an endpoint as an optional third argument, `ctx.zb_write(device_info, {'Power':1}, 2)` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":1}}`. Without one, Tasmota sends to the device's first endpoint. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
+- `ctx` has three helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. Both take an endpoint as an optional third argument, `ctx.zb_write(device_info, {'Power':1}, 2)` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":1}}`. Without one, Tasmota sends to the device's first endpoint. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
+- `ctx.zb_send(device_info, fields)` sends `ZbSend` with the device and any of `ZbSend`'s own fields, for what the other two cannot send. A manufacturer's own attribute needs the manufacturer's code, `ctx.zb_send(device_info, {'Manuf':0x120B,'Write':{'FC90/0008%uint8':1}})` sends `ZbSend {"Device":"0x120E","Manuf":4619,"Write":{"FC90/0008%uint8":1}}`, where `%uint8` gives the type of an attribute Tasmota does not know, and `ctx.zb_send(device_info, {'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]})` reads it back.
 
 ### Writing a function
 
@@ -463,6 +464,18 @@ Two relays, one per endpoint, as on a two gang switch. Each relay reads the mess
         "parse_value": "/device_info,attr_list -> attr_list['Power']",
         "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info, {'Power': value}, 2)",
         "request_value": "/device_info,ctx -> ctx.zb_read(device_info, {'Power': true}, 2)"
+    }
+}
+```
+
+A relay writing a manufacturer's own attribute, from `schema/heiman_hs1sa-e-plus.json`. The smoke alarm's remote hush is attribute `0x0008` of Heiman's cluster `FC90`, which Tasmota does not know, so the write gives its type, and both requests carry Heiman's code, `0x120B`. The write is followed by a read of the attribute, and its answer, such as `{"FC90/0008":1}`, publishes `ON` to `stat/<device_name>/POWER2`
+```json
+"relays": {
+    "TemporaryMute": {
+        "index": 2,
+        "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0008')) == 'int'",
+        "parse_value": "/device_info,attr_list -> attr_list['FC90/0008'] != 0",
+        "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/0008%uint8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]}) end"
     }
 }
 ```
