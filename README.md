@@ -140,6 +140,8 @@ The `SENSOR` and `STATE` messages hold the latest value of every entity that has
 
 In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, in any case, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`). The `ZbmPower` command and the switches in the [web UI](#web-ui) set relays the same way. In Home Assistant a device's only relay is named after the device, and the relays of a device with more than one are named as in its schema, such as *SelfTest* and *Siren* in `schema/heiman_hs1sa-e-plus.json`.
 
+A relay's state is published when the device reports it. A device whose schema sets `deepsleep` only takes a command when it next wakes to poll its parent, every 6 seconds for the Heiman smoke alarm, so the state a command sets is published straight away, and Home Assistant shows the same as the web UI while the command waits. The device's report, or its answer to a read, corrects it if the device did not switch. Other devices usually report straight away, and one that cannot be reached keeps showing its last reported state.
+
 Whatever sets a relay, its `set_value` is only given 1 or 0, and turns that into whatever the device takes, and its `parse_value` turns what the device reports back into on or off. The words used over mqtt, `ON`, `OFF` and `TOGGLE`, are the extension's own, the ones its discovery message gives Home Assistant. A device that takes `'a'` for on and `'b'` for off has `"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Mode': value ? 'a' : 'b'})"` and `"parse_value": "/device_info,attr_list -> attr_list['Mode'] == 'a'"`.
 
 `request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. For battery operated devices that are not actively listening this will end up doing nothing.
@@ -317,7 +319,7 @@ A schema can have these keys
 
 - `relays`, `sensors`, `states`, `switches` and `commands`, the entities by category, see [How it works](#how-it-works) for where each one is published
 - `include`, a list of schemas whose entities are added to this one, such as `["link_quality", "battery_percentage"]`
-- `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1
+- `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1. A device with `deepsleep` also has the state a command sets published straight away, see [How it works](#how-it-works)
 
 Each entity has one or more of the functions below, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
 

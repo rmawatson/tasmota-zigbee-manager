@@ -1211,16 +1211,18 @@ class ZbmMqttBridge
 
     var device_topics   # shortaddr -> the cmnd topics subscribed to for the device's relays
     var relay_states    # "shortaddr:relay number" -> true when the relay was last on, for TOGGLE and the web ui
+    var sleeping        # shortaddr -> true for a device whose schema has deepsleep, see set_relay
     var topic_cache
-    var log 
-    
+    var log
+
 
     def init()
         self.log = ZbmLogger("mqtt_bridge")
         self.topic_cache = {}
         self.device_topics = {}
         self.relay_states = {}
-    end 
+        self.sleeping = {}
+    end
     
     def unload()
         for topics : self.device_topics
@@ -1237,6 +1239,14 @@ class ZbmMqttBridge
             mqtt.unsubscribe(topic)
         end
         self.device_topics.remove(device_info.shortaddr)
+        self.sleeping.remove(device_info.shortaddr)
+    end
+
+    # a relay's state, published as tasmota publishes its own, and kept for TOGGLE and the web ui
+    def publish_relay(device_info,relay_number,publish_value)
+        self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = publish_value == "ON"
+        mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",publish_value)
+        mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":publish_value}))
     end
 
     def cached_topic_data(topic)
@@ -1264,9 +1274,7 @@ class ZbmMqttBridge
                     self.log.error(f"relay '{entity_name}' of {device_info.name}: parse_value returned {value}, expected on or off, as true or false, 1 or 0, or ON or OFF")
                     continue
                 end
-                self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = publish_value == "ON"
-                mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",publish_value)
-                mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":publish_value}))
+                self.publish_relay(device_info,relay_number,publish_value)
 
             elif category_name == "switches"
 
@@ -1334,8 +1342,15 @@ class ZbmMqttBridge
         if result == zb_handler_invalid || result == zb_handler_error
             return false
         end
-        # until the device reports its state, so a second TOGGLE before then switches back
-        self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = value == 1
+        if self.sleeping.contains(device_info.shortaddr)
+            # a device that sleeps takes the command at its next poll, seconds later, and until
+            # then home assistant would show the old state while the web ui shows the new one.
+            # Published now, its report or answer corrects it if the device did not switch
+            self.publish_relay(device_info,relay_number,value == 1 ? "ON" : "OFF")
+        else
+            # until the device reports its state, so a second TOGGLE before then switches back
+            self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = value == 1
+        end
         return true
     end
 
@@ -1350,11 +1365,7 @@ class ZbmMqttBridge
             return
         end
         self.set_relay(device_info,relay_number,relay_components,value)
-
-        # self.log.debug("publishing early response")
-        # mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",string.toupper(payload))
-        # mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":string.toupper(payload)}))
-    end 
+    end
 
     def configure_device(device_info,compiled_schema)
 
@@ -1387,6 +1398,9 @@ class ZbmMqttBridge
         # the topics from the last time are dropped, the device's name or its relays may
         # have changed, and a second listener would send every command to the device twice
         self.unsubscribe_device(device_info)
+        if deepsleep == 1
+            self.sleeping[device_info.shortaddr] = true
+        end
         if compiled_schema.schema.contains("relays")
 
             var relay_state_keys = []
