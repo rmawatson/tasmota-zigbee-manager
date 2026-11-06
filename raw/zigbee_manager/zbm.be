@@ -578,14 +578,19 @@ class ZbmSchemaProcessorInfo
     end
     
 
+    # every repeat in these patterns is lazy, *? and +?. tasmota's re recurses once for each
+    # character a greedy repeat takes and does not check its stack, so .+ over a long function
+    # overflowed the stack and restarted tasmota, while a lazy repeat only recurses to try
+    # what follows it. the patterns match the same functions either way. the patterns that
+    # check names, keys, ids and command arguments are lazy for the same reason
     static def fn_info(value)
         var matches
 
-        if matches := re.match("^\\s*/\\s*([a-zA-Z0-9,_ ]*)(->.+)\\s*$",value)
+        if matches := re.match("^\\s*?/\\s*?([a-zA-Z0-9,_ ]*?)(->.+?)\\s*?$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_LAMBDA,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.*?end)\\s*$",value)
+        elif matches :=re.match("^\\s*?def\\s*?\\(([a-zA-Z0-9,_ ]*?)\\)(.*?end)\\s*?$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_ANON_DEF,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*([a-zA-Z0-9_]+)\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.+end)\\s*$",value)
+        elif matches :=re.match("^\\s*?def\\s*?([a-zA-Z0-9_]+?)\\s*?\\(([a-zA-Z0-9,_ ]*?)\\)(.+?end)\\s*?$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_NAMED_DEF,"args":matches[2],"rest":matches[3],"name":matches[1]})
         end
 
@@ -649,8 +654,9 @@ class ZbmSchemaProcessorInfo
     end
 
     static var value_in = /values -> /value -> (values.find(value) != nil)
-    static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9 _-]+$", name)
-    static var mapping_key_pattern = "^[:a-zA-Z0-9 _-]+$"
+    # lazy repeats, see fn_info
+    static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9 _-]+?$", name)
+    static var mapping_key_pattern = "^[:a-zA-Z0-9 _-]+?$"
     static var valid_mapping = /name -> _class.valid_expr(_class.mapping_key_pattern, name)
 
     static def valid_mapping_key(key)
@@ -2155,7 +2161,8 @@ def valid_integer(value)
         return int(value)
     end
     value = string.tolower(str(value))
-    if re.match("^(?:\\d+|0x[0-9a-f]+)$",value) == nil
+    # lazy repeats, a greedy one recurses once per character, see ZbmSchemaProcessorInfo.fn_info
+    if re.match("^(?:\\d+?|0x[0-9a-f]+?)$",value) == nil
         raise "validation_error",f"expected integer"
     end
     return int(value)
@@ -2241,8 +2248,11 @@ def args_from_payload(payload,payload_json,arg_spec)
 
             #assignment argument 
             # the value can be anything but '=', so a key like SONOFF:ZBMINIR2 or a name with
-            # spaces can be given as key=SONOFF:ZBMINIR2 or devicename=Coffee Machine
-            var matches = re.match("^((?:[a-zA-Z0-9_().]|-)+)=([^=]+)$",split_payload[i])
+            # spaces can be given as key=SONOFF:ZBMINIR2 or devicename=Coffee Machine. the
+            # repeats are lazy, and the key's characters are one class rather than an
+            # alternation, as a greedy repeat or an alternation inside a repeat recurses once
+            # per character, see ZbmSchemaProcessorInfo.fn_info
+            var matches = re.match("^([a-zA-Z0-9_().-]+?)=([^=]+?)$",split_payload[i])
             if matches != nil
                 if is_assignment == false
                     raise "argument_error",f"positional argument already found. invalid assigned argument '{split_payload[i]}'"
