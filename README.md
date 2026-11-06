@@ -146,10 +146,9 @@ Whatever sets a relay, its `set_value` is only given 1 or 0, and turns that into
 
 `request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. A battery operated device only takes the request when it next wakes to poll its parent, so this helps for one that wakes often, such as the Heiman smoke alarm, which polls every 6 seconds and reads its relays' states this way after a restart. For one that sleeps for long, it ends up doing nothing.
 
-The `reset_value` callback is called straight after `parse_value`. It is intended to allow a reset value to be emitted to the mqtt
-topic after the parsed value. In the case of a button, the default home assistant tasmota plugin didn't support the button field of the tasmota discovery message, and will show nothing in the UI.
+In the case of a button, the default home assistant tasmota plugin didn't support the button field of the tasmota discovery message, and will show nothing in the UI.
 
-Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one zigbee message is received (in the case of the Sonoff snzb-01p and probably others) when the button is pressed. This message always has the same `Power:2` value when the button is pressed. Home assistant ignores this as 'no change' for a sensor, and no event is generated within HA. To work around this `reset_value` can be used to send a 0 straight after the value from `parse_value` has been emitted, creating a pulse that can be used to trigger automations.
+Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one zigbee message is received (in the case of the Sonoff snzb-01p and probably others) when the button is pressed. This message always has the same `Power:2` value when the button is pressed. Home assistant ignores this as 'no change' for a sensor, and no event is generated within HA. To work around this the sensor has a `pulse` of 0, which sends a 0 straight after the value from `parse_value` has been emitted, creating a pulse that can be used to trigger automations (see [Schema functions](#schema-functions)).
 
 `format_category` is required for sensors to show up in home assistant without `format_category` the value for the sensor would be at the root of the json fragment sent to the `tele/<device_name>/SENSOR` topic. This is ignored by the home assistant plugin, apart from a few select sensor fields. With the fragment below both `Pressed` and `LinkQuality` would fail to show in the UI
 
@@ -254,7 +253,7 @@ Assuming the device is connected to the zigbee bridge,
     }
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
-All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending requests to the zigbee device, `ctx.zb_write`, `ctx.zb_read` and `ctx.zb_send`.
+All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value` and `parse_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending requests to the zigbee device, `ctx.zb_write`, `ctx.zb_read` and `ctx.zb_send`.
 - In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
@@ -321,9 +320,11 @@ A schema can have these keys
 - `include`, a list of schemas whose entities are added to this one, such as `["link_quality", "battery_percentage"]`
 - `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1. A device with `deepsleep` also has the state a command sets published straight away, see [How it works](#how-it-works)
 
-Each entity has one or more of the functions below, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
+Each entity has one or more of the functions below and can have a `pulse`, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
 
 A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<device_name>/POWER<n>` topics, is its `index`, a whole number from 1 to 32. Relays without an `index` take the free numbers in the order of their names, so `Relay1` and `Relay2` are 1 and 2. Two relays with the same `index` are a mistake, **Upload a schema** rejects them, and a device using them gets the status *Schema compile failed* when it is added.
+
+An entity's `pulse`, a whole number of seconds from 0 to 3600, sets it back that long after it was given another value, by the device's report or, for a relay, a command: a relay or switch back to off, and a sensor or state back to 0. A `pulse` of 0 sets it back straight after, in a second message, for a button whose every press gives the same value, such as *Pressed* in `schema/sonoff_snzb-01p.json` (see [How it works](#how-it-works)). A longer one is for an action whose end the device does not report, such as *SelfTest* in `schema/heiman_hs1sa-e-plus.json`, set back to off 10 seconds after a test starts. Only the state is published, nothing is sent to the device. Set to off or 0 before then, nothing more happens, and given another value, the time starts over.
 
 ### The functions
 
@@ -331,7 +332,6 @@ A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<devi
 |---|---|---|---|
 | `has_value` | For every message from the device | `device_info, attr_list, ctx` | Whether the message has a value for this entity. Without `has_value`, `parse_value` is called for every message |
 | `parse_value` | When `has_value` returned true | `device_info, attr_list, ctx` | The value to publish, `nil` is published as `null`. For a relay, on or off, see [How it works](#how-it-works) |
-| `reset_value` | Straight after `parse_value` | `device_info, attr_list, ctx` | A second value, published straight after the first |
 | `set_value` | Relays only, when the relay is set, by a command on `cmnd/<device_name>/Power<n>`, `ZbmPower` or a switch in the web UI | `device_info, value, ctx` | Nothing. `value` is 1 for on and 0 for off, `TOGGLE` is the opposite of the relay's last state |
 | `request_value` | When the device is configured, see [How it works](#how-it-works) | `device_info, ctx` | Nothing |
 
@@ -442,9 +442,9 @@ A button press as a pulse, from `schema/sonoff_snzb-01p.json`. `{"Power":2}` set
 ```json
 "sensors": {
     "Pressed": {
+        "pulse": 0,
         "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
         "parse_value": "/device_info,attr_list -> int(attr_list['Power']) + 1",
-        "reset_value": "/device_info,attr_list -> 0",
         "format_category": "Button"
     }
 }

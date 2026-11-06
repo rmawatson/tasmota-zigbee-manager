@@ -16,6 +16,7 @@
             "relays": {
                 "SelfTest": {
                     "index": 1,
+                    "pulse": 10,
                     "has_value": "/device_info,attr_list -> attr_list.contains('ZoneStatusChange') || attr_list.contains('ZoneStatus')",
                     "parse_value": "/device_info,attr_list -> ((attr_list.contains('ZoneStatusChange') ? attr_list['ZoneStatusChange'] : attr_list['ZoneStatus']) & 256) != 0",
                     "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,value == 1 ? '0500!02/0101' : '0500!01')",

@@ -573,7 +573,7 @@ class ZbmSchemaProcessorInfo
     static var FN_TYPE_NAMED_DEF = 3
 
     static var categories = ["states","sensors","switches","relays","commands"]
-    static var fn_components = ["has_value","parse_value","request_value","set_value","reset_value"]
+    static var fn_components = ["has_value","parse_value","request_value","set_value"]
 
     static def valid_expr(expr, name)
         # Validate value matches regex expression
@@ -621,6 +621,16 @@ class ZbmSchemaProcessorInfo
     static def valid_index(value)
         if type(value) != "int" || value < 1 || value > _class.max_relays
             raise "validation_error", f"invalid relay index '{value}', expected a whole number from 1 to {_class.max_relays}"
+        end
+        return true
+    end
+
+    # the seconds after which an entity with a pulse is set back, see ZbmMqttBridge.update_pulse
+    static var max_pulse = 3600
+
+    static def valid_pulse(value)
+        if type(value) != "int" || value < 0 || value > _class.max_pulse
+            raise "validation_error", f"invalid pulse '{value}', expected a whole number of seconds from 0 to {_class.max_pulse}"
         end
         return true
     end
@@ -699,6 +709,7 @@ class ZbmSchemaProcessorInfo
                 ZbmSchemaItem(f"one of {_join(_class.fn_components, ', ')}", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
                 ZbmSchemaItem("others", _class.value_in(["format_category"]), _class.OPTIONAL): ZbmSchemaItem("function_item",_class.valid_name( "name")),
                 ZbmSchemaItem("index", "index", _class.OPTIONAL): ZbmSchemaItem("relay_index",_class.valid_index),
+                ZbmSchemaItem("pulse", "pulse", _class.OPTIONAL): ZbmSchemaItem("pulse",_class.valid_pulse),
             }
         },
         ZbmSchemaItem("config", "config", _class.OPTIONAL): {ZbmSchemaItem("config_item", _class.valid_name("config_key"), _class.OPTIONAL):nil},
@@ -1212,6 +1223,7 @@ class ZbmMqttBridge
     var device_topics   # shortaddr -> the cmnd topics subscribed to for the device's relays
     var relay_states    # "shortaddr:relay number" -> true when the relay was last on, for TOGGLE and the web ui
     var sleeping        # shortaddr -> true for a device whose schema has deepsleep, see set_relay
+    var pulses          # the timer ids of the entities waiting to be set back, see update_pulse
     var topic_cache
     var log
 
@@ -1222,14 +1234,48 @@ class ZbmMqttBridge
         self.device_topics = {}
         self.relay_states = {}
         self.sleeping = {}
+        self.pulses = {}
     end
-    
+
     def unload()
         for topics : self.device_topics
             for topic : topics
                 mqtt.unsubscribe(topic)
             end
         end
+        for timer_id : self.pulses.keys()
+            tasmota.remove_timer(timer_id)
+        end
+        self.pulses = {}
+    end
+
+    # an entity with a pulse in its schema is set back, a relay or switch to off and a sensor or
+    # state to 0, that many seconds after it was given another value. With 0 it is set back
+    # straight after, for a button whose every press gives the same value, and with more, for an
+    # action whose end the device does not report, such as a self-test. Only the state is
+    # published, nothing is sent to the device. Given a value again, the time starts over, and set
+    # back before then, nothing more happens. set_back is whether the value just given is off or 0.
+    # A relay is known by its number, set_relay is not given its name
+    def update_pulse(device_info,category_name,dispatch_data,set_back)
+        var entity = category_name == "relays" ? dispatch_data.relay_number : dispatch_data.entity_name
+        var timer_id = f"zbm_pulse_{device_info.shortaddr}_{category_name}_{entity}"
+        if self.pulses.contains(timer_id)
+            tasmota.remove_timer(timer_id)
+            self.pulses.remove(timer_id)
+        end
+        var pulse = dispatch_data.components.find("pulse")
+        if set_back || pulse == nil
+            return
+        end
+        var reset = ZbmStruct({"components":dispatch_data.components,"entity_name":dispatch_data.entity_name,
+                               "relay_number":dispatch_data.relay_number,"value":0})
+        self.pulses[timer_id] = true
+        # tasmota runs its timers every 50ms, a pulse of 0 at the next run, after the value
+        # has been published
+        tasmota.set_timer(pulse * 1000, def ()
+            self.pulses.remove(timer_id)
+            self.dispatch_value(device_info,category_name,[reset])
+        end, timer_id)
     end
 
     # stops listening for commands to the device's relays, when it is removed, reset, or
@@ -1275,18 +1321,21 @@ class ZbmMqttBridge
                     continue
                 end
                 self.publish_relay(device_info,relay_number,publish_value)
+                self.update_pulse(device_info,category_name,dispatch_data,publish_value == "OFF")
 
             elif category_name == "switches"
 
                 var topic = f"tele/{device_info.name}/SENSOR"
                 var cached_payload = self.cached_topic_data(topic)
 
-                cached_payload[entity_name] = (type(value) == "int" || type(value) == "bool") ? (value ? "ON" : "OFF") : value
+                var switch_value = (type(value) == "int" || type(value) == "bool") ? (value ? "ON" : "OFF") : value
+                cached_payload[entity_name] = switch_value
                 cached_payload["Time"] = zb_timestr()
 
                 if !topic_data.contains(topic)
                     topic_data[topic] = {"payload":cached_payload,"retain":zb_sensor_retain()}
-                end    
+                end
+                self.update_pulse(device_info,category_name,dispatch_data,switch_value == "OFF")
             elif category_name == "states"
 
                 var topic = f"tele/{device_info.name}/STATE"
@@ -1297,7 +1346,8 @@ class ZbmMqttBridge
 
                 if !topic_data.contains(topic)
                     topic_data[topic] = {"payload":cached_payload,"retain":zb_state_retain()}
-                end 
+                end
+                self.update_pulse(device_info,category_name,dispatch_data,value == 0)
             elif category_name == "sensors"
                 var topic = f"tele/{device_info.name}/SENSOR"
                 var cached_payload = self.cached_topic_data(topic)
@@ -1318,6 +1368,7 @@ class ZbmMqttBridge
                 if !topic_data.contains(topic)
                     topic_data[topic] = {"payload":cached_payload,"retain":zb_sensor_retain()}
                 end
+                self.update_pulse(device_info,category_name,dispatch_data,value == 0)
             end
         end
 
@@ -1351,6 +1402,8 @@ class ZbmMqttBridge
             # until the device reports its state, so a second TOGGLE before then switches back
             self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = value == 1
         end
+        self.update_pulse(device_info,"relays",ZbmStruct({"components":relay_components,"entity_name":nil,
+                                                          "relay_number":relay_number}),value != 1)
         return true
     end
 
@@ -2156,7 +2209,6 @@ class ZbmService
                 continue
             end
             var dispatch_data = []
-            var reset_dispatch_data = []
 
             var entity_list = compiled_schema.schema[category_name]
 
@@ -2188,17 +2240,11 @@ class ZbmService
                     continue
                 else
                     self.log.debug(f"new value for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}={value}")
-                    dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":value}))                    
-                end
-                
-                var reset_value #temporary solution to have a push button masqurade as a sensor and 'toggle' its value
-                if [zb_handler_invalid,zb_handler_error].find(reset_value := zb_invoke_handler("reset_value",components,device_info,attr_list)) == nil
-                    self.log.debug(f"new reset for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}={reset_value}")
-                    reset_dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":reset_value}))  
+                    dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":value}))
                 end
             end
+            # an entity with a pulse is set back after this, see ZbmMqttBridge.update_pulse
             zbm_mqtt_bridge.dispatch_value(device_info,category_name,dispatch_data)
-            zbm_mqtt_bridge.dispatch_value(device_info,category_name,reset_dispatch_data)
         end
     end
 
