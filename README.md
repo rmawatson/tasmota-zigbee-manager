@@ -46,7 +46,7 @@ Every device found on the bridge is listed, named devices first. Each shows its 
 - **Add** (`ZbmAddDevice`) is shown for every device that is not added. A name typed into the box is set first, so an unnamed device can be named and added in one go. Add also clears the errors left by an earlier attempt, so it can be pressed again once a missing schema has been added.
 - **Reset** (`ZbmResetDevice`) clears the device's status. **Remove** (`ZbmRemoveDevice`) removes it, after asking. After either, its messages are no longer processed and its relays no longer take commands, until it is added again.
 - **Poll devices** (`ZbmPollDevices`) looks for devices joining or leaving the bridge now.
-- **Pull schemas** (`ZbmPullSchemas`) downloads the schemas for every device from this repository, including devices that are already added, as their schemas may have been updated. The button shows *Pulling schemas...* until it has finished.
+- **Pull schemas** (`ZbmPullSchemas`) downloads the schemas for every device from the [schema location](#settings), this repository's `main` branch unless it was changed, including devices that are already added, as their schemas may have been updated. The message at the top names the location, and the button shows *Pulling schemas...* until it has finished.
 
 When a device is not added, a hint below its details says what to do. The statuses are
 
@@ -96,7 +96,10 @@ Changes the values otherwise set with `ZbmConfig`. **Reset settings** puts them 
 | Remove devices that leave | `auto_remove_devices` | on | Drop devices that are no longer paired with the bridge from the list |
 | Name devices automatically | `auto_name_devices` | off | Name unnamed devices `manufacturer-model N` when they are added. Not recommended |
 | Key devices by manufacturer:model | `auto_key_devices` | on | Needed to use the schemas in this repository |
+| Schema location | `schema_url` | this repository's `main` branch | Where **Pull schemas** downloads `index.json` and the schemas from. Empty puts back the default |
 | Log level | `log_level` | Info | None, Error, Info or Debug. Use Debug when looking into a problem |
+
+The schema location is the address of the folder holding `index.json`, by default `https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema`. To pull from another branch replace `main` with its name, such as `.../refs/heads/develop/schema`, or give the same folder in a fork or on a server of your own. It must start with `http://` or `https://`, and a slash at its end is left out. A pull keeps the location it started with, a change made while it runs applies from the next pull.
 
 ### Main page
 
@@ -135,16 +138,17 @@ When a new zigbee message arrives, the device it came from is looked up. If it i
 
 The `SENSOR` and `STATE` messages hold the latest value of every entity that has had one since the extension started, not only the values from the last zigbee message. They are retained when Tasmota's `SensorRetain` (for `SENSOR`) or `StateRetain` (for `STATE`) is on, so turn these on if Home Assistant should show the last values straight after it restarts.
 
-In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, in any case, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`). The `ZbmPower` command and the switches in the [web UI](#web-ui) set relays the same way.
+In the case of relays, `cmnd/<device_name>/Power<n>` is subscribed to, where `<n>` is the relay's number, its `index` or its place in the order of the relay names (see [Schema functions](#schema-functions)). The relay's state is published with the same number. A command received there is passed to the relay's `set_value` callback as 1 or 0: `ON`, `1` and `TRUE` are 1, `OFF`, `0` and `FALSE` are 0, in any case, and `TOGGLE` or `2` is the opposite of the relay's last state. Any other payload is ignored, with an error in the log. This is expected to write the value to the zigbee device (see `schema/sonoff_minir2.json`). The `ZbmPower` command and the switches in the [web UI](#web-ui) set relays the same way. In Home Assistant a device's only relay is named after the device, and the relays of a device with more than one are named as in its schema, such as *SelfTest* and *Siren* in `schema/heiman_hs1sa-e-plus.json`.
+
+A relay's state is published when the device reports it. A device whose schema sets `deepsleep` only takes a command when it next wakes to poll its parent, every 6 seconds for the Heiman smoke alarm, so the state a command sets is published straight away, and Home Assistant shows the same as the web UI while the command waits. The device's report, or its answer to a read, corrects it if the device did not switch. Other devices usually report straight away, and one that cannot be reached keeps showing its last reported state.
 
 Whatever sets a relay, its `set_value` is only given 1 or 0, and turns that into whatever the device takes, and its `parse_value` turns what the device reports back into on or off. The words used over mqtt, `ON`, `OFF` and `TOGGLE`, are the extension's own, the ones its discovery message gives Home Assistant. A device that takes `'a'` for on and `'b'` for off has `"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Mode': value ? 'a' : 'b'})"` and `"parse_value": "/device_info,attr_list -> attr_list['Mode'] == 'a'"`.
 
-`request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. For battery operated devices that are not actively listening this will end up doing nothing.
+`request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. A battery operated device only takes the request when it next wakes to poll its parent, so this helps for one that wakes often, such as the Heiman smoke alarm, which polls every 6 seconds and reads its relays' states this way after a restart. For one that sleeps for long, it ends up doing nothing.
 
-The `reset_value` callback is called straight after `parse_value`. It is intended to allow a reset value to be emitted to the mqtt
-topic after the parsed value. In the case of a button, the default home assistant tasmota plugin didn't support the button field of the tasmota discovery message, and will show nothing in the UI.
+In the case of a button, the default home assistant tasmota plugin didn't support the button field of the tasmota discovery message, and will show nothing in the UI.
 
-Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one zigbee message is received (in the case of the Sonoff snzb-01p and probably others) when the button is pressed. This message always has the same `Power:2` value when the button is pressed. Home assistant ignores this as 'no change' for a sensor, and no event is generated within HA. To work around this `reset_value` can be used to send a 0 straight after the value from `parse_value` has been emitted, creating a pulse that can be used to trigger automations.
+Implementing the button as a sensor (see `schema/sonoff_snzb-01p.json`) only one zigbee message is received (in the case of the Sonoff snzb-01p and probably others) when the button is pressed. This message always has the same `Power:2` value when the button is pressed. Home assistant ignores this as 'no change' for a sensor, and no event is generated within HA. To work around this the sensor has a `pulse` of 0, which sends a 0 straight after the value from `parse_value` has been emitted, creating a pulse that can be used to trigger automations (see [Schema functions](#schema-functions)).
 
 `format_category` is required for sensors to show up in home assistant without `format_category` the value for the sensor would be at the root of the json fragment sent to the `tele/<device_name>/SENSOR` topic. This is ignored by the home assistant plugin, apart from a few select sensor fields. With the fragment below both `Pressed` and `LinkQuality` would fail to show in the UI
 
@@ -249,7 +253,7 @@ Assuming the device is connected to the zigbee bridge,
     }
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
-All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value`, `parse_value` and `reset_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending write and read requests to the zigbee device, `ctx.zb_write` and `ctx.zb_read`.
+All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value` and `parse_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending requests to the zigbee device, `ctx.zb_write`, `ctx.zb_read` and `ctx.zb_send`.
 - In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
@@ -306,7 +310,7 @@ Note: it may require some experimentation in the console using Tasmota's `ZbSend
     }
     ```
 - The schema can now be added to the registry by pasting it into **Upload a schema** on the [Schemas page](#schemas), which checks it and tells you what is wrong if it is rejected, or with `ZbmAddSchema <paste_the_json>`
-- Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manifest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbmPullSchemas` should be all that is required to set up your device.
+- Once the schema has been tested and confirmed working it can be added to the repository. Clone the repository, put the schema in the schema folder and run `scripts/update_manifest.py` to update the manifest (used by `ZbmPullSchemas`). Submit a PR. For future use of your schema, `ZbmPullSchemas` should be all that is required to set up your device. To pull it before the PR is merged, set the [schema location](#settings) to the branch it is on.
 
 ## Schema functions
 
@@ -314,11 +318,13 @@ A schema can have these keys
 
 - `relays`, `sensors`, `states`, `switches` and `commands`, the entities by category, see [How it works](#how-it-works) for where each one is published
 - `include`, a list of schemas whose entities are added to this one, such as `["link_quality", "battery_percentage"]`
-- `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1
+- `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1. A device with `deepsleep` also has the state a command sets published straight away, see [How it works](#how-it-works)
 
-Each entity has one or more of the functions below, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
+Each entity has one or more of the functions below and can have a `pulse`, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
 
 A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<device_name>/POWER<n>` topics, is its `index`, a whole number from 1 to 32. Relays without an `index` take the free numbers in the order of their names, so `Relay1` and `Relay2` are 1 and 2. Two relays with the same `index` are a mistake, **Upload a schema** rejects them, and a device using them gets the status *Schema compile failed* when it is added.
+
+An entity's `pulse`, a whole number of seconds from 0 to 3600, sets it back that long after it was given another value, by the device's report or, for a relay, a command: a relay or switch back to off, and a sensor or state back to 0. A `pulse` of 0 sets it back straight after, in a second message, for a button whose every press gives the same value, such as *Pressed* in `schema/sonoff_snzb-01p.json` (see [How it works](#how-it-works)). A longer one is for an action whose end the device does not report, or a safety net for one whose end it does. *SelfTest* in `schema/heiman_hs1sa-e-plus.json` has a `pulse` of 10: the alarm reports the end of its test, and if that report is missed, or the alarm never acted on the command, the switch is still set back to off. Only the state is published, nothing is sent to the device. Set to off or 0 before then, nothing more happens, and given another value, the time starts over.
 
 ### The functions
 
@@ -326,7 +332,6 @@ A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<devi
 |---|---|---|---|
 | `has_value` | For every message from the device | `device_info, attr_list, ctx` | Whether the message has a value for this entity. Without `has_value`, `parse_value` is called for every message |
 | `parse_value` | When `has_value` returned true | `device_info, attr_list, ctx` | The value to publish, `nil` is published as `null`. For a relay, on or off, see [How it works](#how-it-works) |
-| `reset_value` | Straight after `parse_value` | `device_info, attr_list, ctx` | A second value, published straight after the first |
 | `set_value` | Relays only, when the relay is set, by a command on `cmnd/<device_name>/Power<n>`, `ZbmPower` or a switch in the web UI | `device_info, value, ctx` | Nothing. `value` is 1 for on and 0 for off, `TOGGLE` is the opposite of the relay's last state |
 | `request_value` | When the device is configured, see [How it works](#how-it-works) | `device_info, ctx` | Nothing |
 
@@ -334,7 +339,8 @@ A relay must have `set_value`, otherwise the device is marked *Schema compile fa
 
 - `device_info` is the device, with `device_info.name`, `device_info.deviceid` (`0x120E`), `device_info.shortaddr` (as a number), `device_info.manufacturer`, `device_info.model`, `device_info.key`, `device_info.lqi` and `device_info.battery`.
 - `attr_list` is a map of the attributes in the zigbee message, as shown in the `attributes_final` debug line, such as `{"Power":1,"Endpoint":1,"LinkQuality":149}`. Read it with `attr_list.contains('Power')`, `attr_list['Power']`, or `attr_list.find('Power')`, which gives `nil` rather than an error when the attribute is missing.
-- `ctx` has two helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. Both take an endpoint as an optional third argument, `ctx.zb_write(device_info, {'Power':1}, 2)` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":1}}`. Without one, Tasmota sends to the device's first endpoint. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
+- `ctx` has three helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. Both take an endpoint as an optional third argument, `ctx.zb_write(device_info, {'Power':1}, 2)` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":1}}`. Without one, Tasmota sends to the device's first endpoint. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
+- `ctx.zb_send(device_info, fields)` sends `ZbSend` with the device and any of `ZbSend`'s own fields, for what the other two cannot send. A manufacturer's own attribute needs the manufacturer's code, `ctx.zb_send(device_info, {'Manuf':0x120B,'Write':{'FC90/0008%uint8':1}})` sends `ZbSend {"Device":"0x120E","Manuf":4619,"Write":{"FC90/0008%uint8":1}}`, where `%uint8` gives the type of an attribute Tasmota does not know, and `ctx.zb_send(device_info, {'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]})` reads it back.
 
 ### Writing a function
 
@@ -436,9 +442,9 @@ A button press as a pulse, from `schema/sonoff_snzb-01p.json`. `{"Power":2}` set
 ```json
 "sensors": {
     "Pressed": {
+        "pulse": 0,
         "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
         "parse_value": "/device_info,attr_list -> int(attr_list['Power']) + 1",
-        "reset_value": "/device_info,attr_list -> 0",
         "format_category": "Button"
     }
 }
@@ -460,6 +466,18 @@ Two relays, one per endpoint, as on a two gang switch. Each relay reads the mess
         "parse_value": "/device_info,attr_list -> attr_list['Power']",
         "set_value": "/device_info,value,ctx -> ctx.zb_write(device_info, {'Power': value}, 2)",
         "request_value": "/device_info,ctx -> ctx.zb_read(device_info, {'Power': true}, 2)"
+    }
+}
+```
+
+A relay writing a manufacturer's own attribute, from `schema/heiman_hs1sa-e-plus.json`. The smoke alarm's remote hush is attribute `0x0008` of Heiman's cluster `FC90`, which Tasmota does not know, so the write gives its type, and both requests carry Heiman's code, `0x120B`. The write is followed by a read of the attribute, and its answer is the relay's state, published to `stat/<device_name>/POWER2`. When the alarm is not sounding, it accepts the write but answers `{"FC90/0008":0}`, so the switch goes back to off once the alarm answers, at its next poll
+```json
+"relays": {
+    "TemporaryMute": {
+        "index": 2,
+        "has_value": "/device_info,attr_list -> type(attr_list.find('FC90/0008')) == 'int'",
+        "parse_value": "/device_info,attr_list -> attr_list['FC90/0008'] != 0",
+        "set_value": "def (device_info,value,ctx) ctx.zb_send(device_info,{'Manuf':0x120B,'Write':{'FC90/0008%uint8':value}}) ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]}) end"
     }
 }
 ```
@@ -520,6 +538,9 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 >
 > `auto_key_devices`<br/>
 > Enable/disable generating the key used to look up the device's schema, of the form `manufacturer:model`. A key of your own can be given with `ZbmAddDevice devicekey=<key>`, for example to map two identical devices to different schemas. With this off, every device needs one. `default=true`
+>
+> `schema_url`<br/>
+> The address of the folder `ZbmPullSchemas` downloads `index.json`, the manifests and the schemas from, see [Settings](#settings), such as `ZbmConfig schema_url=https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/develop/schema`. `ZbmConfig {"schema_url":""}` puts back the default `default=https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema`
 >
 > `log_level`<br/>
 > The log level of the zbm extension, 0 none, 1 error, 2 info or 3 debug. Use 3 when debugging any issue, errors in schema functions are only logged at 3 `default=2`
@@ -592,9 +613,9 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 
 > ### ZbmPullSchemas (wo)
 >
-> For all devices attached to the zigbee bridge, attempts to download valid schemas and mappings from the github repository for them based on the device key (or generated key if `auto_key_devices=true`). For devices that have schemas in the repository, assuming they are all named with `ZbName` already, with default settings this would be all that is required to make them discoverable (and in the case of home assistant they would show up as devices in the tasmota integration)
+> For all devices attached to the zigbee bridge, attempts to download valid schemas and mappings for them from the schema location (`schema_url`, this repository's `main` branch by default) based on the device key (or generated key if `auto_key_devices=true`). For devices that have schemas in the repository, assuming they are all named with `ZbName` already, with default settings this would be all that is required to make them discoverable (and in the case of home assistant they would show up as devices in the tasmota integration)
 >
-> The download runs in the background, one file at a time, so the command returns straight away with `{"ZbmPullSchemas":{"Status":"Started","Keys":[...]}}`. Schemas are downloaded for every device, including devices that are already added, as the repository may have newer versions, together with the schemas they include. Each downloaded schema replaces the one in the registry as a whole as soon as it arrives (a schema you added yourself under the same name as one in the repository is overwritten), and devices that are already added are configured again so the changes take effect. Failed requests are retried. Once finished the result is logged and published to `stat/<topic>/RESULT`, either `{"ZbmPullSchemas":{"Status":"Done","Schemas":[...],"NotFound":[...]}}` or `{"ZbmPullSchemas":{"Status":"Failed","Error":"...","Schemas":[...]}}`, where `Schemas` lists the schemas replaced before the failure.
+> The download runs in the background, one file at a time, so the command returns straight away with `{"ZbmPullSchemas":{"Status":"Started","Url":"...","Keys":[...]}}`, where `Url` is the location it downloads from. Schemas are downloaded for every device, including devices that are already added, as the repository may have newer versions, together with the schemas they include. Each downloaded schema replaces the one in the registry as a whole as soon as it arrives (a schema you added yourself under the same name as one in the repository is overwritten), and devices that are already added are configured again so the changes take effect. Failed requests are retried. Once finished the result is logged and published to `stat/<topic>/RESULT`, either `{"ZbmPullSchemas":{"Status":"Done","Schemas":[...],"NotFound":[...]}}` or `{"ZbmPullSchemas":{"Status":"Failed","Error":"...","Schemas":[...]}}`, where `Schemas` lists the schemas replaced before the failure.
 
 ## To do/Notes
 Entities in `commands` (see `schema/sonoff_minir2.json`) are accepted, and their `request_value` is called, but their values are not published and nothing is subscribed to for their `set_value`. Home Assistant doesn't really have a no code/yaml way to call them, but it would still be nice to listen to the topics to configure things such as TurboMode on the sonoff_minir2.

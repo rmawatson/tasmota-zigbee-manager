@@ -15,9 +15,9 @@
             },
             "sensors": {
                 "Pressed": {
+                    "pulse": 0,
                     "has_value": "/device_info,attr_list -> attr_list.contains('Power')",
                     "parse_value": "/device_info,attr_list -> int(attr_list['Power'])+1",
-                    "reset_value": "/device_info,attr_list -> 0",
                     "format_category": "Button"
                 }
             }

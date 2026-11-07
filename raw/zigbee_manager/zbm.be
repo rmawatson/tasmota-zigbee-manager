@@ -331,6 +331,16 @@ def zb_read(device_info,payload,endpoint)
     zb_send(zb_payload)
 end
 
+# ZbSend to the device with any of its fields, for what zb_write and zb_read cannot send, such
+# as a manufacturer's own attribute, which needs its code: {'Manuf':0x120B,'Write':{...}}
+def zb_send_device(device_info,fields)
+    var zb_payload = {"Device":device_info.deviceid}
+    for key : fields.keys()
+        zb_payload[key] = fields[key]
+    end
+    zb_send(zb_payload)
+end
+
 
 
 def zb_timestr(time_type)
@@ -356,7 +366,8 @@ def zb_invoke_handler(callback_name,components,device_info,*args)
 
         var context = ZbmStruct({
             "zb_write":_make_call_fn(zb_write),
-            "zb_read":_make_call_fn(zb_read)})        
+            "zb_read":_make_call_fn(zb_read),
+            "zb_send":_make_call_fn(zb_send_device)})
         try
             return call(components[callback_name].fn,device_info,args + [context])
         except .. as e,m
@@ -562,7 +573,7 @@ class ZbmSchemaProcessorInfo
     static var FN_TYPE_NAMED_DEF = 3
 
     static var categories = ["states","sensors","switches","relays","commands"]
-    static var fn_components = ["has_value","parse_value","request_value","set_value","reset_value"]
+    static var fn_components = ["has_value","parse_value","request_value","set_value"]
 
     static def valid_expr(expr, name)
         # Validate value matches regex expression
@@ -578,14 +589,19 @@ class ZbmSchemaProcessorInfo
     end
     
 
+    # every repeat in these patterns is lazy, *? and +?. tasmota's re recurses once for each
+    # character a greedy repeat takes and does not check its stack, so .+ over a long function
+    # overflowed the stack and restarted tasmota, while a lazy repeat only recurses to try
+    # what follows it. the patterns match the same functions either way. the patterns that
+    # check names, keys, ids and command arguments are lazy for the same reason
     static def fn_info(value)
         var matches
 
-        if matches := re.match("^\\s*/\\s*([a-zA-Z0-9,_ ]*)(->.+)\\s*$",value)
+        if matches := re.match("^\\s*?/\\s*?([a-zA-Z0-9,_ ]*?)(->.+?)\\s*?$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_LAMBDA,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.*?end)\\s*$",value)
+        elif matches :=re.match("^\\s*?def\\s*?\\(([a-zA-Z0-9,_ ]*?)\\)(.*?end)\\s*?$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_ANON_DEF,"args":matches[1],"rest":matches[2],"name":nil})
-        elif matches :=re.match("^\\s*def\\s*([a-zA-Z0-9_]+)\\s*\\(([a-zA-Z0-9,_ ]*)\\)(.+end)\\s*$",value)
+        elif matches :=re.match("^\\s*?def\\s*?([a-zA-Z0-9_]+?)\\s*?\\(([a-zA-Z0-9,_ ]*?)\\)(.+?end)\\s*?$",value)
             return ZbmStruct({"all":matches[0], "type":_class.FN_TYPE_NAMED_DEF,"args":matches[2],"rest":matches[3],"name":matches[1]})
         end
 
@@ -605,6 +621,16 @@ class ZbmSchemaProcessorInfo
     static def valid_index(value)
         if type(value) != "int" || value < 1 || value > _class.max_relays
             raise "validation_error", f"invalid relay index '{value}', expected a whole number from 1 to {_class.max_relays}"
+        end
+        return true
+    end
+
+    # the seconds after which an entity with a pulse is set back, see ZbmMqttBridge.update_pulse
+    static var max_pulse = 3600
+
+    static def valid_pulse(value)
+        if type(value) != "int" || value < 0 || value > _class.max_pulse
+            raise "validation_error", f"invalid pulse '{value}', expected a whole number of seconds from 0 to {_class.max_pulse}"
         end
         return true
     end
@@ -649,8 +675,9 @@ class ZbmSchemaProcessorInfo
     end
 
     static var value_in = /values -> /value -> (values.find(value) != nil)
-    static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9 _-]+$", name)
-    static var mapping_key_pattern = "^[:a-zA-Z0-9 _-]+$"
+    # lazy repeats, see fn_info
+    static var valid_name = /name -> _class.valid_expr("^[a-zA-Z0-9 _-]+?$", name)
+    static var mapping_key_pattern = "^[:a-zA-Z0-9 _-]+?$"
     static var valid_mapping = /name -> _class.valid_expr(_class.mapping_key_pattern, name)
 
     static def valid_mapping_key(key)
@@ -682,6 +709,7 @@ class ZbmSchemaProcessorInfo
                 ZbmSchemaItem(f"one of {_join(_class.fn_components, ', ')}", _class.value_in(_class.fn_components), _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
                 ZbmSchemaItem("others", _class.value_in(["format_category"]), _class.OPTIONAL): ZbmSchemaItem("function_item",_class.valid_name( "name")),
                 ZbmSchemaItem("index", "index", _class.OPTIONAL): ZbmSchemaItem("relay_index",_class.valid_index),
+                ZbmSchemaItem("pulse", "pulse", _class.OPTIONAL): ZbmSchemaItem("pulse",_class.valid_pulse),
             }
         },
         ZbmSchemaItem("config", "config", _class.OPTIONAL): {ZbmSchemaItem("config_item", _class.valid_name("config_key"), _class.OPTIONAL):nil},
@@ -1194,23 +1222,60 @@ class ZbmMqttBridge
 
     var device_topics   # shortaddr -> the cmnd topics subscribed to for the device's relays
     var relay_states    # "shortaddr:relay number" -> true when the relay was last on, for TOGGLE and the web ui
+    var sleeping        # shortaddr -> true for a device whose schema has deepsleep, see set_relay
+    var pulses          # the timer ids of the entities waiting to be set back, see update_pulse
     var topic_cache
-    var log 
-    
+    var log
+
 
     def init()
         self.log = ZbmLogger("mqtt_bridge")
         self.topic_cache = {}
         self.device_topics = {}
         self.relay_states = {}
-    end 
-    
+        self.sleeping = {}
+        self.pulses = {}
+    end
+
     def unload()
         for topics : self.device_topics
             for topic : topics
                 mqtt.unsubscribe(topic)
             end
         end
+        for timer_id : self.pulses.keys()
+            tasmota.remove_timer(timer_id)
+        end
+        self.pulses = {}
+    end
+
+    # an entity with a pulse in its schema is set back, a relay or switch to off and a sensor or
+    # state to 0, that many seconds after it was given another value. With 0 it is set back
+    # straight after, for a button whose every press gives the same value, and with more, for an
+    # action whose end the device does not report, such as a self-test. Only the state is
+    # published, nothing is sent to the device. Given a value again, the time starts over, and set
+    # back before then, nothing more happens. set_back is whether the value just given is off or 0.
+    # A relay is known by its number, set_relay is not given its name
+    def update_pulse(device_info,category_name,dispatch_data,set_back)
+        var entity = category_name == "relays" ? dispatch_data.relay_number : dispatch_data.entity_name
+        var timer_id = f"zbm_pulse_{device_info.shortaddr}_{category_name}_{entity}"
+        if self.pulses.contains(timer_id)
+            tasmota.remove_timer(timer_id)
+            self.pulses.remove(timer_id)
+        end
+        var pulse = dispatch_data.components.find("pulse")
+        if set_back || pulse == nil
+            return
+        end
+        var reset = ZbmStruct({"components":dispatch_data.components,"entity_name":dispatch_data.entity_name,
+                               "relay_number":dispatch_data.relay_number,"value":0})
+        self.pulses[timer_id] = true
+        # tasmota runs its timers every 50ms, a pulse of 0 at the next run, after the value
+        # has been published
+        tasmota.set_timer(pulse * 1000, def ()
+            self.pulses.remove(timer_id)
+            self.dispatch_value(device_info,category_name,[reset])
+        end, timer_id)
     end
 
     # stops listening for commands to the device's relays, when it is removed, reset, or
@@ -1220,6 +1285,14 @@ class ZbmMqttBridge
             mqtt.unsubscribe(topic)
         end
         self.device_topics.remove(device_info.shortaddr)
+        self.sleeping.remove(device_info.shortaddr)
+    end
+
+    # a relay's state, published as tasmota publishes its own, and kept for TOGGLE and the web ui
+    def publish_relay(device_info,relay_number,publish_value)
+        self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = publish_value == "ON"
+        mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",publish_value)
+        mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":publish_value}))
     end
 
     def cached_topic_data(topic)
@@ -1247,21 +1320,22 @@ class ZbmMqttBridge
                     self.log.error(f"relay '{entity_name}' of {device_info.name}: parse_value returned {value}, expected on or off, as true or false, 1 or 0, or ON or OFF")
                     continue
                 end
-                self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = publish_value == "ON"
-                mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",publish_value)
-                mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":publish_value}))
+                self.publish_relay(device_info,relay_number,publish_value)
+                self.update_pulse(device_info,category_name,dispatch_data,publish_value == "OFF")
 
             elif category_name == "switches"
 
                 var topic = f"tele/{device_info.name}/SENSOR"
                 var cached_payload = self.cached_topic_data(topic)
 
-                cached_payload[entity_name] = (type(value) == "int" || type(value) == "bool") ? (value ? "ON" : "OFF") : value
+                var switch_value = (type(value) == "int" || type(value) == "bool") ? (value ? "ON" : "OFF") : value
+                cached_payload[entity_name] = switch_value
                 cached_payload["Time"] = zb_timestr()
 
                 if !topic_data.contains(topic)
                     topic_data[topic] = {"payload":cached_payload,"retain":zb_sensor_retain()}
-                end    
+                end
+                self.update_pulse(device_info,category_name,dispatch_data,switch_value == "OFF")
             elif category_name == "states"
 
                 var topic = f"tele/{device_info.name}/STATE"
@@ -1272,7 +1346,8 @@ class ZbmMqttBridge
 
                 if !topic_data.contains(topic)
                     topic_data[topic] = {"payload":cached_payload,"retain":zb_state_retain()}
-                end 
+                end
+                self.update_pulse(device_info,category_name,dispatch_data,value == 0)
             elif category_name == "sensors"
                 var topic = f"tele/{device_info.name}/SENSOR"
                 var cached_payload = self.cached_topic_data(topic)
@@ -1293,6 +1368,7 @@ class ZbmMqttBridge
                 if !topic_data.contains(topic)
                     topic_data[topic] = {"payload":cached_payload,"retain":zb_sensor_retain()}
                 end
+                self.update_pulse(device_info,category_name,dispatch_data,value == 0)
             end
         end
 
@@ -1317,8 +1393,17 @@ class ZbmMqttBridge
         if result == zb_handler_invalid || result == zb_handler_error
             return false
         end
-        # until the device reports its state, so a second TOGGLE before then switches back
-        self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = value == 1
+        if self.sleeping.contains(device_info.shortaddr)
+            # a device that sleeps takes the command at its next poll, seconds later, and until
+            # then home assistant would show the old state while the web ui shows the new one.
+            # Published now, its report or answer corrects it if the device did not switch
+            self.publish_relay(device_info,relay_number,value == 1 ? "ON" : "OFF")
+        else
+            # until the device reports its state, so a second TOGGLE before then switches back
+            self.relay_states[f"{device_info.shortaddr}:{relay_number}"] = value == 1
+        end
+        self.update_pulse(device_info,"relays",ZbmStruct({"components":relay_components,"entity_name":nil,
+                                                          "relay_number":relay_number}),value != 1)
         return true
     end
 
@@ -1333,11 +1418,7 @@ class ZbmMqttBridge
             return
         end
         self.set_relay(device_info,relay_number,relay_components,value)
-
-        # self.log.debug("publishing early response")
-        # mqtt.publish(f"stat/{device_info.name}/POWER{relay_number}",string.toupper(payload))
-        # mqtt.publish(f"stat/{device_info.name}/RESULT",json.dump({f"POWER{relay_number}":string.toupper(payload)}))
-    end 
+    end
 
     def configure_device(device_info,compiled_schema)
 
@@ -1361,9 +1442,18 @@ class ZbmMqttBridge
             end
         end
 
+        # home assistant names each relay from the friendly name at its position, the first
+        # after the device when it is the device's name, and a relay without one "switch <n>".
+        # A device with more than one relay has them named as in its schema
+        var friendly_names = [device_info.name]
+        var relay_names = {}
+
         # the topics from the last time are dropped, the device's name or its relays may
         # have changed, and a second listener would send every command to the device twice
         self.unsubscribe_device(device_info)
+        if deepsleep == 1
+            self.sleeping[device_info.shortaddr] = true
+        end
         if compiled_schema.schema.contains("relays")
 
             var relay_state_keys = []
@@ -1377,6 +1467,7 @@ class ZbmMqttBridge
                     relays.push(0)
                 end
                 relays[relay_number-1] = 1
+                relay_names[relay_number] = relay_name
 
                 if relay_components.contains("set_value")
                     var topic = f"cmnd/{device_info.name}/Power{relay_number}"
@@ -1394,6 +1485,13 @@ class ZbmMqttBridge
 
         end
 
+        if size(relay_names) > 1
+            friendly_names = []
+            for relay_number : 1..size(relays)
+                friendly_names.push(relay_names.find(relay_number))
+            end
+        end
+
         if compiled_schema.schema.contains("switches")
             for switch_name : compiled_schema.schema["switches"].keys()
                 switches.push(1)
@@ -1407,7 +1505,7 @@ class ZbmMqttBridge
             json.dump({
                 "ip": state_map["IPAddress"],
                 "dn": device_info.name,
-                "fn": [device_info.name],
+                "fn": friendly_names,
                 "hn": state_map["Hostname"],
                 "mac": device_info.macaddr,
                 "md": device_info.model,
@@ -1519,8 +1617,30 @@ class ZbmState : ZbmNotify
         "auto_remove_devices":true,
         "auto_name_devices":false,
         "auto_key_devices":true,
-        "log_level":2
+        "log_level":2,
+        # the folder ZbmPullSchemas downloads index.json, the manifests and the schemas from
+        "schema_url":"https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
     }
+
+    # url as the schema_url setting keeps it, without the slashes at its end so a file name
+    # can follow a slash, and the default when it is empty. nil when webclient cannot fetch
+    # from it
+    static def valid_schema_url(url)
+        url = url != nil ? strip(str(url)) : ""
+        var length = size(url)
+        while length > 0 && url[length-1] == "/"
+            length -= 1
+        end
+        if length == 0
+            return _class.config_defaults["schema_url"]
+        end
+        url = url[0..length-1]
+        var lower = string.tolower(url)
+        if !string.startswith(lower,"http://") && !string.startswith(lower,"https://")
+            return nil
+        end
+        return url
+    end
 
     def init()
 
@@ -2089,7 +2209,6 @@ class ZbmService
                 continue
             end
             var dispatch_data = []
-            var reset_dispatch_data = []
 
             var entity_list = compiled_schema.schema[category_name]
 
@@ -2121,17 +2240,11 @@ class ZbmService
                     continue
                 else
                     self.log.debug(f"new value for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}={value}")
-                    dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":value}))                    
-                end
-                
-                var reset_value #temporary solution to have a push button masqurade as a sensor and 'toggle' its value
-                if [zb_handler_invalid,zb_handler_error].find(reset_value := zb_invoke_handler("reset_value",components,device_info,attr_list)) == nil
-                    self.log.debug(f"new reset for {device_info.shortaddr}:{schema_name}:{category_name}:{entity_name}={reset_value}")
-                    reset_dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":reset_value}))  
+                    dispatch_data.push(ZbmStruct({"components":components,"entity_name":entity_name,"relay_number":relay_number,"value":value}))
                 end
             end
+            # an entity with a pulse is set back after this, see ZbmMqttBridge.update_pulse
             zbm_mqtt_bridge.dispatch_value(device_info,category_name,dispatch_data)
-            zbm_mqtt_bridge.dispatch_value(device_info,category_name,reset_dispatch_data)
         end
     end
 
@@ -2155,7 +2268,8 @@ def valid_integer(value)
         return int(value)
     end
     value = string.tolower(str(value))
-    if re.match("^(?:\\d+|0x[0-9a-f]+)$",value) == nil
+    # lazy repeats, a greedy one recurses once per character, see ZbmSchemaProcessorInfo.fn_info
+    if re.match("^(?:\\d+?|0x[0-9a-f]+?)$",value) == nil
         raise "validation_error",f"expected integer"
     end
     return int(value)
@@ -2241,8 +2355,11 @@ def args_from_payload(payload,payload_json,arg_spec)
 
             #assignment argument 
             # the value can be anything but '=', so a key like SONOFF:ZBMINIR2 or a name with
-            # spaces can be given as key=SONOFF:ZBMINIR2 or devicename=Coffee Machine
-            var matches = re.match("^((?:[a-zA-Z0-9_().]|-)+)=([^=]+)$",split_payload[i])
+            # spaces can be given as key=SONOFF:ZBMINIR2 or devicename=Coffee Machine. the
+            # repeats are lazy, and the key's characters are one class rather than an
+            # alternation, as a greedy repeat or an alternation inside a repeat recurses once
+            # per character, see ZbmSchemaProcessorInfo.fn_info
+            var matches = re.match("^([a-zA-Z0-9_().-]+?)=([^=]+?)$",split_payload[i])
             if matches != nil
                 if is_assignment == false
                     raise "argument_error",f"positional argument already found. invalid assigned argument '{split_payload[i]}'"
@@ -2614,7 +2731,7 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
         elif ttype == "real"
             return real(argv)
         elif ttype == "string"
-            return string(argv)
+            return str(argv)
         end
     end
 
@@ -2634,6 +2751,13 @@ def zbm_config(cmmd_name,idx,payload,payload_json)
     for arg : parsed_args
         if arg.name == "auto_poll_devices_period" && arg.value != nil && (arg.value < 1 || arg.value > 3600)
             return log_cmnd_error(cmmd_name,f"auto_poll_devices_period must be from 1 to 3600 seconds, got {arg.value}")
+        end
+        if arg.name == "schema_url" && arg.value != nil
+            var url = ZbmState.valid_schema_url(arg.value)
+            if url == nil
+                return log_cmnd_error(cmmd_name,f"schema_url must start with http:// or https://, got '{arg.value}'")
+            end
+            arg.value = url
         end
     end
 
@@ -2699,9 +2823,9 @@ class ZbmSchemaPuller
     # and zigbee while the files download. the schemas are always downloaded, even when
     # already in the registry, as the repository may have newer versions. each file
     # replaces the schemas it defines as soon as it has been downloaded, then the added
-    # devices using them are configured again so the changes take effect.
+    # devices using them are configured again so the changes take effect. the files come
+    # from the schema_url setting, this repository's main branch unless it was changed
 
-    static var url_base = "https://raw.githubusercontent.com/rmawatson/tasmota-zigbee-manager/refs/heads/main/schema"
     static var timer_id = "zbm_pull_schemas"
     static var step_delay = 100
     static var retry_delay = 2000
@@ -2715,6 +2839,7 @@ class ZbmSchemaPuller
     static var current = nil
 
     var log
+    var url
     var keys
     var manifests
     var pending
@@ -2728,6 +2853,9 @@ class ZbmSchemaPuller
 
     def init(keys)
         self.log = ZbmLogger("pull_schemas")
+        # taken when the pull starts, the setting changing during a pull does not mix
+        # files from two places
+        self.url = zbm_state.schema_url
         self.keys = []
         for key : keys
             if self.keys.find(key) == nil
@@ -2746,7 +2874,7 @@ class ZbmSchemaPuller
 
     def start()
         self.running = true
-        self.log.info(f"pulling schemas for {self.keys}")
+        self.log.info(f"pulling schemas for {self.keys} from {self.url}")
         self.next(/-> self.read_index())
     end
 
@@ -2787,7 +2915,7 @@ class ZbmSchemaPuller
     end
 
     def fetch(file_name)
-        var url = f"{self.url_base}/{file_name}"
+        var url = f"{self.url}/{file_name}"
         self.log.debug(f"requesting {url}")
 
         var client = webclient()
@@ -2970,7 +3098,7 @@ def zbm_pull_schmeas(cmnd_name,idx,payload,payload_json)
     var puller = ZbmSchemaPuller(request_list)
     ZbmSchemaPuller.current = puller
     puller.start()
-    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Keys":puller.keys}}))
+    tasmota.resp_cmnd(json.dump({cmnd_name:{"Status":"Started","Url":puller.url,"Keys":puller.keys}}))
 end
 
 class ZbmWebUI
@@ -2989,6 +3117,7 @@ class ZbmWebUI
         ["auto_remove_devices","Remove devices that leave","Drop devices from the list once they are no longer paired with the bridge."],
         ["auto_name_devices","Name devices automatically","Name unnamed devices manufacturer-model when they are added. Not recommended."],
         ["auto_key_devices","Key devices by manufacturer:model","The schemas in the repository are mapped from these keys."],
+        ["schema_url","Schema location","Where Pull schemas downloads index.json and the schemas from. Replace main with another branch, or give a fork or your own server. Empty for this repository's main branch."],
         ["log_level","Log level",nil]
     ]
     static var log_levels = ["None","Error","Info","Debug"]
@@ -3486,6 +3615,9 @@ class ZbmWebUI
                     options += f"<option value='{level}'{selected}>{self.log_levels[level]}</option>"
                 end
                 webserver.content_send(f"<p><b>{setting[1]}</b><br><select name='{key}'>{options}</select></p>")
+            elif key == "schema_url"
+                var placeholder = webserver.html_escape(ZbmState.config_defaults[key])
+                webserver.content_send(f"<p><b>{setting[1]}</b><br><input type='url' name='{key}' value='{webserver.html_escape(value)}' placeholder='{placeholder}'><br><small>{setting[2]}</small></p>")
             else
                 var checked = value ? " checked" : ""
                 webserver.content_send(f"<p><label><input type='checkbox' name='{key}'{checked}><b>{setting[1]}</b></label><br><small>{setting[2]}</small></p>")
@@ -3623,7 +3755,7 @@ class ZbmWebUI
         var response = tasmota.cmd("ZbmPullSchemas")
         var result = isinstance(response,map) ? response.find("ZbmPullSchemas") : nil
         if isinstance(result,map) && result.find("Status") == "Started"
-            return ["Pulling schemas, the result is shown in the console",true]
+            return [f"Pulling schemas from {result.find('Url')}, the result is shown in the console",true]
         elif result == "Done"
             return ["No devices with a key to pull schemas for",true]
         end
@@ -3754,10 +3886,14 @@ class ZbmWebUI
 
         var period = int(webserver.arg("auto_poll_devices_period"))
         var log_level = int(webserver.arg("log_level"))
+        # kept when the form has no such field, as a page loaded before an update
+        var schema_url = webserver.has_arg("schema_url") ? ZbmState.valid_schema_url(webserver.arg("schema_url")) : zbm_state.schema_url
         if period < 1 || period > 3600
             return ["The poll period must be between 1 and 3600 seconds",false]
         elif log_level < 0 || log_level >= size(self.log_levels)
             return ["Unknown log level",false]
+        elif schema_url == nil
+            return ["The schema location must start with http:// or https://",false]
         end
 
         for setting : self.settings
@@ -3767,6 +3903,8 @@ class ZbmWebUI
                 value = period
             elif key == "log_level"
                 value = log_level
+            elif key == "schema_url"
+                value = schema_url
             end
             zbm_state.setmember(key,value)
         end
