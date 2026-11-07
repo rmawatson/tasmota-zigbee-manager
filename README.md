@@ -324,7 +324,7 @@ Each entity has one or more of the functions below and can have a `pulse`, a sen
 
 A relay's number, the `<n>` of its `cmnd/<device_name>/Power<n>` and `stat/<device_name>/POWER<n>` topics, is its `index`, a whole number from 1 to 32. Relays without an `index` take the free numbers in the order of their names, so `Relay1` and `Relay2` are 1 and 2. Two relays with the same `index` are a mistake, **Upload a schema** rejects them, and a device using them gets the status *Schema compile failed* when it is added.
 
-An entity's `pulse`, a whole number of seconds from 0 to 3600, sets it back that long after it was given another value, by the device's report or, for a relay, a command: a relay or switch back to off, and a sensor or state back to 0. A `pulse` of 0 sets it back straight after, in a second message, for a button whose every press gives the same value, such as *Pressed* in `schema/sonoff_snzb-01p.json` (see [How it works](#how-it-works)). A longer one is for an action whose end the device does not report, such as *SelfTest* in `schema/heiman_hs1sa-e-plus.json`, set back to off 10 seconds after a test starts. Only the state is published, nothing is sent to the device. Set to off or 0 before then, nothing more happens, and given another value, the time starts over.
+An entity's `pulse`, a whole number of seconds from 0 to 3600, sets it back that long after it was given another value, by the device's report or, for a relay, a command: a relay or switch back to off, and a sensor or state back to 0. A `pulse` of 0 sets it back straight after, in a second message, for a button whose every press gives the same value, such as *Pressed* in `schema/sonoff_snzb-01p.json` (see [How it works](#how-it-works)). A longer one is for an action whose end the device does not report, or a safety net for one whose end it does. *SelfTest* in `schema/heiman_hs1sa-e-plus.json` has a `pulse` of 10: the alarm reports the end of its test, and if that report is missed, or the alarm never acted on the command, the switch is still set back to off. Only the state is published, nothing is sent to the device. Set to off or 0 before then, nothing more happens, and given another value, the time starts over.
 
 ### The functions
 
@@ -470,7 +470,7 @@ Two relays, one per endpoint, as on a two gang switch. Each relay reads the mess
 }
 ```
 
-A relay writing a manufacturer's own attribute, from `schema/heiman_hs1sa-e-plus.json`. The smoke alarm's remote hush is attribute `0x0008` of Heiman's cluster `FC90`, which Tasmota does not know, so the write gives its type, and both requests carry Heiman's code, `0x120B`. The write is followed by a read of the attribute, and its answer, such as `{"FC90/0008":1}`, publishes `ON` to `stat/<device_name>/POWER2`
+A relay writing a manufacturer's own attribute, from `schema/heiman_hs1sa-e-plus.json`. The smoke alarm's remote hush is attribute `0x0008` of Heiman's cluster `FC90`, which Tasmota does not know, so the write gives its type, and both requests carry Heiman's code, `0x120B`. The write is followed by a read of the attribute, and its answer is the relay's state, published to `stat/<device_name>/POWER2`. When the alarm is not sounding, it accepts the write but answers `{"FC90/0008":0}`, so the switch goes back to off once the alarm answers, at its next poll
 ```json
 "relays": {
     "TemporaryMute": {
