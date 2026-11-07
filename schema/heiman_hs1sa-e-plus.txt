@@ -1,1 +1,1 @@
-Heiman HS1SA-E-PLUS smart smoke alarm. Smoke, battery low and test come from the IAS zone status, fault, mute, smoke level and chamber contamination from the Heiman cluster FC90
+Heiman HS1SA-E-PLUS smart smoke alarm. Smoke, battery low and test come from the IAS zone status, fault, mute, smoke level and chamber contamination from the Heiman cluster FC90. Fault, chamber contamination and mute are read 30 seconds after the alarm is configured, and it includes ias_zone, which checks it is enrolled with the bridge

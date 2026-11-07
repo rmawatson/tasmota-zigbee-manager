@@ -57,7 +57,7 @@ When a device is not added, a hint below its details says what to do. The status
 | Device unnamed | It needs a name before it can be added |
 | No mapping found | No schema is mapped to the device's key. Pull schemas, or upload a schema or add a mapping for it, then press Add |
 | Schema not found | The key is mapped to a schema that is not in the registry |
-| Schema compile failed | The schema could not be used: one of its functions does not compile, a schema it includes is missing, or a relay has no `set_value`. The reason is logged with `log_level` 3 |
+| Schema compile failed | The schema could not be used: one of its functions does not compile, a schema it includes is missing, a relay has no `set_value`, or a task's `expect` names a handler it does not have. The reason is logged with `log_level` 3 |
 | No default key available | The device has not reported its manufacturer and model yet, so it has no key |
 | Device not found | The device is no longer paired with the bridge (only listed when *Remove devices that leave* is off) |
 | Device was removed | Removed from the manager, press Reset to be able to add it again |
@@ -66,7 +66,7 @@ When a device is not added, a hint below its details says what to do. The status
 
 <img src="docs/images/schemas.png" alt="Schemas page" width="420">
 
-Lists the schemas in the registry, each with the schemas it includes, its entities by category and the device keys mapped to it. **Remove** removes a schema (`ZbmRemoveSchema`), devices mapped to it stop working until another schema is mapped to their key. **Reset schemas**, at the bottom of the page, removes every schema and mapping (`ZbmResetSchemas`).
+Lists the schemas in the registry, each with the schemas it includes, its entities by category, its tasks and handlers, and the device keys mapped to it. **Remove** removes a schema (`ZbmRemoveSchema`), devices mapped to it stop working until another schema is mapped to their key. **Reset schemas**, at the bottom of the page, removes every schema and mapping (`ZbmResetSchemas`).
 
 <img src="docs/images/schemas-upload.png" alt="Uploading a schema, and the mappings" width="420">
 
@@ -76,6 +76,7 @@ Lists the schemas in the registry, each with the schemas it includes, its entiti
 - it does not follow the schema layout, for example an unknown category, or an entity without any function
 - one of its functions does not compile
 - two of its relays have the same `index`
+- a task's `expect` names a handler that is not in the schema or a schema it includes, or a task without an `expect` has a `timeout` or `retries`
 - it includes a schema, or maps a key to a schema, that is neither in the registry nor in the same upload
 
 A rejected schema stays in the box so it can be corrected. The upload shown above is rejected with *Schema rejected, acme_door includes battery_pct, which is not in the registry*. An accepted schema replaces any schema with the same name as a whole, and added devices using it are configured again so the changes reach Home Assistant.
@@ -145,6 +146,8 @@ A relay's state is published when the device reports it. A device whose schema s
 Whatever sets a relay, its `set_value` is only given 1 or 0, and turns that into whatever the device takes, and its `parse_value` turns what the device reports back into on or off. The words used over mqtt, `ON`, `OFF` and `TOGGLE`, are the extension's own, the ones its discovery message gives Home Assistant. A device that takes `'a'` for on and `'b'` for off has `"set_value": "/device_info,value,ctx -> ctx.zb_write(device_info,{'Mode': value ? 'a' : 'b'})"` and `"parse_value": "/device_info,attr_list -> attr_list['Mode'] == 'a'"`.
 
 `request_value` is called whenever the device is configured: when it is added, when the extension starts, when mqtt reconnects, and when its schema is pulled or uploaded again. This is to allow probing of the device to get its current status. A battery operated device only takes the request when it next wakes to poll its parent, so this helps for one that wakes often, such as the Heiman smoke alarm, which polls every 6 seconds and reads its relays' states this way after a restart. For one that sleeps for long, it ends up doing nothing.
+
+A schema can also have `tasks`, requests sent to the device a set time after it is configured and then on a schedule, and `handlers`, which are given the messages from the device after its entities and can act on them, such as enrolling an alarm that is not enrolled with the bridge, see [Tasks and handlers](#tasks-and-handlers).
 
 In the case of a button, the default home assistant tasmota plugin didn't support the button field of the tasmota discovery message, and will show nothing in the UI.
 
@@ -253,7 +256,7 @@ Assuming the device is connected to the zigbee bridge,
     }
     ```
 - Create the callbacks for processing the messages from zigbee, [Schema functions](#schema-functions) has the details and more examples.
-All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value` and `parse_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending requests to the zigbee device, `ctx.zb_write`, `ctx.zb_read` and `ctx.zb_send`.
+All callbacks are passed the current device's `device_info`, along with the attribute list for `has_value` and `parse_value`, the value to set for `set_value` (1 for on, 0 for off, see [How it works](#how-it-works)), or nothing more for `request_value`. All callbacks are passed a `ctx` object as their last argument, with helper functions for sending requests to the zigbee device, `ctx.zb_write`, `ctx.zb_read` and `ctx.zb_send`, and `ctx.cmd`, `ctx.log` and `ctx.bridge_address`, see [Schema functions](#schema-functions).
 - In this case, setting and reading the `Power` field is all that is required<br>
 `has_value` should return a boolean value as to whether or not the value exists. If it always exists this is not required.<br/>
 `"has_value": "/device_info,attr_list -> attr_list.contains('Power')"`<br/>
@@ -317,7 +320,8 @@ Note: it may require some experimentation in the console using Tasmota's `ZbSend
 A schema can have these keys
 
 - `relays`, `sensors`, `states`, `switches` and `commands`, the entities by category, see [How it works](#how-it-works) for where each one is published
-- `include`, a list of schemas whose entities are added to this one, such as `["link_quality", "battery_percentage"]`
+- `include`, a list of schemas whose entities, tasks and handlers are added to this one, such as `["link_quality", "battery_percentage"]`
+- `tasks` and `handlers`, requests sent to the device when it is configured and on a schedule, and what is done with the messages from it, see [Tasks and handlers](#tasks-and-handlers)
 - `config`, where `battery` and `deepsleep` set the battery and deep sleep flags (`bat` and `dslp`) of the discovery message. The battery powered sensors in this repository set both to 1. A device with `deepsleep` also has the state a command sets published straight away, see [How it works](#how-it-works)
 
 Each entity has one or more of the functions below and can have a `pulse`, a sensor can have a `format_category`, and a relay an `index`. Names of schemas, entities and format categories can contain letters, digits, spaces, `_` and `-`, and mapping keys can also contain `:`.
@@ -334,6 +338,8 @@ An entity's `pulse`, a whole number of seconds from 0 to 3600, sets it back that
 | `parse_value` | When `has_value` returned true | `device_info, attr_list, ctx` | The value to publish, `nil` is published as `null`. For a relay, on or off, see [How it works](#how-it-works) |
 | `set_value` | Relays only, when the relay is set, by a command on `cmnd/<device_name>/Power<n>`, `ZbmPower` or a switch in the web UI | `device_info, value, ctx` | Nothing. `value` is 1 for on and 0 for off, `TOGGLE` is the opposite of the relay's last state |
 | `request_value` | When the device is configured, see [How it works](#how-it-works) | `device_info, ctx` | Nothing |
+| `run` | Tasks only, when the task is due, or by `ZbmRunTask`, see [Tasks and handlers](#tasks-and-handlers) | `device_info, ctx` | Nothing |
+| `on_value` | Handlers only, when the handler's `has_value` returned true | `device_info, attr_list, ctx` | Nothing |
 
 A relay must have `set_value`, otherwise the device is marked *Schema compile failed* when its first message arrives.
 
@@ -341,6 +347,29 @@ A relay must have `set_value`, otherwise the device is marked *Schema compile fa
 - `attr_list` is a map of the attributes in the zigbee message, as shown in the `attributes_final` debug line, such as `{"Power":1,"Endpoint":1,"LinkQuality":149}`. Read it with `attr_list.contains('Power')`, `attr_list['Power']`, or `attr_list.find('Power')`, which gives `nil` rather than an error when the attribute is missing.
 - `ctx` has three helpers that send a `ZbSend` command to the device. `ctx.zb_write(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Send":{"Power":1}}`, and `ctx.zb_read(device_info, {'Power':1})` sends `ZbSend {"Device":"0x120E","Read":{"Power":1}}`. Both take an endpoint as an optional third argument, `ctx.zb_write(device_info, {'Power':1}, 2)` sends `ZbSend {"Device":"0x120E","Endpoint":2,"Send":{"Power":1}}`. Without one, Tasmota sends to the device's first endpoint. The payload can also be a string, as `TurboMode` in `schema/sonoff_minir2.json` does, which is sent as it is, `"Send":"FC11_00/120029"`.
 - `ctx.zb_send(device_info, fields)` sends `ZbSend` with the device and any of `ZbSend`'s own fields, for what the other two cannot send. A manufacturer's own attribute needs the manufacturer's code, `ctx.zb_send(device_info, {'Manuf':0x120B,'Write':{'FC90/0008%uint8':1}})` sends `ZbSend {"Device":"0x120E","Manuf":4619,"Write":{"FC90/0008%uint8":1}}`, where `%uint8` gives the type of an attribute Tasmota does not know, and `ctx.zb_send(device_info, {'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0008]})` reads it back.
+- `ctx.cmd(command)` runs a Tasmota command and returns its answer, such as `ctx.cmd(f'ZbCIE {device_info.deviceid},1')`. `ctx.log(text)` writes an info line to the log after the device's name, `ZBM: info > RELAY-01 : text`.
+- `ctx.bridge_address` is the bridge's IEEE address in the form Tasmota shows a device's address attributes, such as `IASCIEAddress`, with its bytes in the order they are sent: `09A22337004B1200` for a bridge whose address is `0x00124B003723A209`. It is `nil` while the address is not known, before Zigbee has started.
+
+### Tasks and handlers
+
+`tasks` send requests to the device by themselves, and `handlers` act on the messages from it. They are for what is not an entity's value, such as reading attributes that the device only sends when they change, or checking that the device is set up as it should be and setting it up when it is not. Nothing is published for them, and the answers to a task's requests reach the entities like any other message.
+
+A task runs `delay` seconds after the device is configured (see [How it works](#how-it-works)), and then every `period` seconds when it has one. Each time the device is configured, its tasks start over.
+
+| Key | Required | Meaning |
+|---|---|---|
+| `run` | Yes | The function that sends the requests, given `device_info, ctx` |
+| `delay` | No | Seconds from the device being configured to the first run, a whole number from 0 to 3600, 0 by default |
+| `period` | No | Seconds between the runs after that, from 60 to 604800 (a week). Without one, the task runs once each time the device is configured |
+| `expect` | No | The handler that takes the answer |
+| `timeout` | No, only with `expect` | Seconds to wait for that handler to take a message, from 1 to 3600, 60 by default |
+| `retries` | No, only with `expect` | How many more times the task runs when no answer comes in time, from 0 to 10, 0 by default. After the last, `no answer from <device_name> to task <task>` is logged as an error, and the task waits for its next run |
+
+A handler has a `has_value`, which says whether it takes a message, as for an entity, and an `on_value`, which is given the messages it takes. Every message from the device goes to the entities first and then to each handler, whether a task asked for it or the device sent it by itself. Tasmota does not say which request a message answers, so a task with an `expect` has its answer when that handler takes a message from the device.
+
+Handlers are given the messages that reach the entities: reports, answers to reads, the answers to reading or configuring reporting (`ReadConfig` and `ConfigResponse`), and the commands from the device that Tasmota decodes, such as `ZoneStatusChange`. Answers to writes and default responses, which Tasmota publishes as `ZbResponse`, and replies about bindings do not reach them.
+
+Like `request_value`, a task's requests to a device that sleeps wait until the device next polls its parent. A `delay` keeps them apart from the reads its relays make when it is configured. `ZbmRunTask` runs a task straight away, to try it without waiting, see [Exposed commands](#exposed-commands).
 
 ### Writing a function
 
@@ -368,12 +397,13 @@ A function is Berry code in a JSON string, in one of three forms
     ZBM: debug > invoke_handler parse_value : key_error,Power
     ZBM: debug > device_manager : an error occurred executing parse_value handler for 4622:mysonoff_r2:relays:MyRelay
     ```
-- A function that does not compile, or an include that is not in the registry, gives the device the status *Schema compile failed* when it is added, and the reason is logged with `log_level` 3. **Upload a schema** on the [Schemas page](#schemas) compiles the functions and checks the includes before anything is stored, `ZbmAddSchema` does not.
+- A task's `run`, or a handler's `has_value` or `on_value`, that raises an error is turned off in the same way, and is also logged as an error, such as `ZBM: error > tasks : task CheckEnrollment of FIREALARM-OFFICE failed and is turned off, see the log with log_level 3`.
+- A function that does not compile, an include that is not in the registry, or a task's `expect` naming a handler the schema does not have, gives the device the status *Schema compile failed* when it is added, and the reason is logged with `log_level` 3. **Upload a schema** on the [Schemas page](#schemas) compiles the functions and checks the includes and the handlers before anything is stored, `ZbmAddSchema` does not.
 - To see everything a device sends while working on its schema, log it from a `has_value`, as in the last example below.
 
 ### Examples
 
-Each of these is one category of a schema, to go in the schema's entry in `schemas`.
+Each of these is one category of a schema, or its tasks and handlers, to go in the schema's entry in `schemas`.
 
 A sensor reading an attribute, from `schema/sonoff_snzb-02p.json`. `{"Temperature":21.37}` sets `"Sensor":{"Temperature":21.37}` in `tele/<device_name>/SENSOR`
 ```json
@@ -482,6 +512,36 @@ A relay writing a manufacturer's own attribute, from `schema/heiman_hs1sa-e-plus
 }
 ```
 
+Tasks and a handler that keep an IAS zone device enrolled with the bridge, `schema/ias_zone.json`, which any IAS zone device can include, as `schema/heiman_hs1sa-e-plus.json` does. A minute after the device is configured, and then every day, `CheckEnrollment` reads `ZoneState` and `IASCIEAddress`. `Enrollment` takes the answer, and when the device is not enrolled, or is enrolled with another address than the bridge's, it sends `ZbCIE` and `ZbEnroll` to the endpoint the answer came from, the commands Tasmota sends when a device pairs. With no answer in 2 minutes, the read is sent again, at most twice. The answer from an alarm that is not enrolled, `{"ZoneState":0,"ZoneType":40,"ZoneStatus":48,"IASCIEAddress":"0000000000000000","Endpoint":1}`, runs `ZbCIE 0xCD19,1` and then `ZbEnroll 0xCD19,1`
+```json
+"tasks": {
+    "CheckEnrollment": {
+        "delay": 60,
+        "period": 86400,
+        "run": "/device_info,ctx -> ctx.zb_read(device_info,{'ZoneState':true,'IASCIEAddress':true})",
+        "expect": "Enrollment",
+        "timeout": 120,
+        "retries": 2
+    }
+},
+"handlers": {
+    "Enrollment": {
+        "has_value": "/device_info,attr_list -> attr_list.contains('ZoneState') && attr_list.contains('IASCIEAddress')",
+        "on_value": "def (device_info,attr_list,ctx) if attr_list['ZoneState'] != 1 || attr_list['IASCIEAddress'] != ctx.bridge_address var endpoint = attr_list.find('Endpoint',1) ctx.log(f'not enrolled with this bridge, enrolling endpoint {endpoint}') ctx.cmd(f'ZbCIE {device_info.deviceid},{endpoint}') ctx.cmd(f'ZbEnroll {device_info.deviceid},{endpoint}') end end"
+    }
+}
+```
+
+A task whose answers go to the entities, from `schema/heiman_hs1sa-e-plus.json`. Without it, *Fault*, *ChamberContamination* and *Muted* have no value until the alarm sends them by itself. 30 seconds after the alarm is configured, `ReadStatus` reads all three in one request, and the answer, such as `{"FC90/0002":0,"FC90/0017":0,"FC90/0009":0}`, sets `"Fault":"OFF"`, `"Muted":"OFF"` and `"Sensor":{"ChamberContamination":"Normal"}`
+```json
+"tasks": {
+    "ReadStatus": {
+        "delay": 30,
+        "run": "/device_info,ctx -> ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0002,0x0017,0x0009]})"
+    }
+}
+```
+
 Logging every message from the device, on several lines. It publishes nothing, as `has_value` always returns false
 ```json
 "states": {
@@ -512,6 +572,10 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 > ### ZbmPower (rw)
 >
 > Sets a relay of an added device, like Tasmota's `Power` command and the device's `cmnd/<device_name>/Power<n>` topic, `ZbmPower<n> <device>,<value>`. `<n>` is the relay's number, 1 when it is left off, and the device is its id or its name, such as `ZbmPower Coffee Machine,ON`, `ZbmPower1 0x1C88,TOGGLE` or `ZbmPower2 {"device":"Stairs","power":"OFF"}`. The value is `ON`, `OFF` or `TOGGLE`, or `1`, `0`, `TRUE`, `FALSE` or `2`, in any case. Without a value it reports the relay's state. It answers `{"ZbmPower1":{"devicename":"Coffee Machine","deviceid":"0x1C88","state":"ON"}}`, with the state that was set until the device reports it, and `null` while the state is not known. It answers `Error` when the device is not found or not added, has no relay `<n>`, or its `set_value` failed
+
+> ### ZbmRunTask (wo)
+>
+> Runs a task of an added device's schema now, as when it is due, `ZbmRunTask <device>,<task>`, where the device is its id or its name, such as `ZbmRunTask FIREALARM-OFFICE,CheckEnrollment` or `ZbmRunTask {"device":"0xCD19","task":"CheckEnrollment"}`, see [Tasks and handlers](#tasks-and-handlers). A task with an `expect` waits for its answer, and runs again with its `retries`, as when it is due, and when it is next due does not change. It answers `{"ZbmRunTask":{"devicename":"FIREALARM-OFFICE","deviceid":"0xCD19","task":"CheckEnrollment"}}`, or `Error` when the device is not found or not added, has no such task, or the task is turned off after an error
 
 > ### ZbmSchemas (ro)
 >
@@ -571,7 +635,7 @@ A device id is the device's short address, in hex as `ZbmDevices` shows it, `0x1
 >
 > Adding a schema that is already in the registry merges it with the stored one: the entities and functions in the new one replace the stored ones, those only in the stored one are kept, and an `include` list is replaced as a whole. A mapping that is already in the registry is replaced.
 >
-> The layout of the schema is checked, but its functions are not compiled, its includes are not looked up and the indexes of its relays are not compared, so a mistake in them shows up as *Schema compile failed* when a device using the schema is added. **Upload a schema** on the [Schemas page](#schemas) checks all of these before anything is stored, and replaces a stored schema as a whole.
+> The layout of the schema is checked, but its functions are not compiled, its includes and the handlers its tasks expect are not looked up, and the indexes of its relays are not compared, so a mistake in them shows up as *Schema compile failed* when a device using the schema is added. **Upload a schema** on the [Schemas page](#schemas) checks all of these before anything is stored, and replaces a stored schema as a whole.
 
 > ### ZbmResetSchemas (wo)
 >
