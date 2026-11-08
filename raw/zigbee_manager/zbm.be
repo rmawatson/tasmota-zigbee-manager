@@ -418,25 +418,17 @@ def zb_invoke_handler(callback_name,components,device_info,*args)
     return zb_handler_invalid
 end
 
-def zb_retain(retain_type)
-    var value = tasmota.cmd(retain_type)[retain_type]
-    if type(value) != "string"
-        return !!value
-    end
-    # the reply is tasmota's state text, OFF or ON unless StateText1/2 were changed
-    var text = string.toupper(value)
-    if text == "OFF" || text == "ON"
-        return text == "ON"
-    end
-    return value != tasmota.cmd("StateText1")["StateText1"]
-end
-
+# tasmota's StateRetain and SensorRetain, read from its settings each time, so a change applies
+# to the next message. Running the commands instead would publish their answer to
+# stat/<topic>/RESULT with every message. get_option numbers the bits of tasmota's settings
+# flags as SetOption does: SensorRetain is bit 9 of the first flags, option 9, and StateRetain
+# bit 7 of the fifth, which start at option 114, so option 121
 def zb_state_retain()
-    return zb_retain("StateRetain")
+    return tasmota.get_option(121) == 1
 end
 
 def zb_sensor_retain()
-    return zb_retain("SensorRetain")
+    return tasmota.get_option(9) == 1
 end
 
 
