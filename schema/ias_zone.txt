@@ -1,0 +1,1 @@
+IAS zone enrollment check, to include in the schema of any IAS zone device (smoke, water leak, contact, motion). A minute after the device is configured, and then daily, it reads ZoneState and IASCIEAddress, and when the device is not enrolled with this bridge it sends ZbCIE and ZbEnroll. With no answer within 2 minutes it reads again, twice

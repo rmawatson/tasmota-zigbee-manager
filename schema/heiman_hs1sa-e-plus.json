@@ -7,11 +7,18 @@
         "heiman_hs1sa-e-plus": {
             "include": [
                 "link_quality",
-                "battery_percentage"
+                "battery_percentage",
+                "ias_zone"
             ],
             "config": {
                 "battery": 1,
                 "deepsleep": 1
+            },
+            "tasks": {
+                "ReadStatus": {
+                    "delay": 30,
+                    "run": "/device_info,ctx -> ctx.zb_send(device_info,{'Manuf':0x120B,'Cluster':0xFC90,'Read':[0x0002,0x0017,0x0009]})"
+                }
             },
             "relays": {
                 "SelfTest": {

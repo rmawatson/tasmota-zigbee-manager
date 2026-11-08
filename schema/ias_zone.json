@@ -1,0 +1,23 @@
+{
+    "version": 1,
+    "schemas": {
+        "ias_zone": {
+            "tasks": {
+                "CheckEnrollment": {
+                    "delay": 60,
+                    "period": 86400,
+                    "run": "/device_info,ctx -> ctx.zb_read(device_info,{'ZoneState':true,'IASCIEAddress':true})",
+                    "expect": "Enrollment",
+                    "timeout": 120,
+                    "retries": 2
+                }
+            },
+            "handlers": {
+                "Enrollment": {
+                    "has_value": "/device_info,attr_list -> attr_list.contains('ZoneState') && attr_list.contains('IASCIEAddress')",
+                    "on_value": "def (device_info,attr_list,ctx) if attr_list['ZoneState'] != 1 || attr_list['IASCIEAddress'] != ctx.bridge_address var endpoint = attr_list.find('Endpoint',1) ctx.log(f'not enrolled with this bridge, enrolling endpoint {endpoint}') ctx.cmd(f'ZbCIE {device_info.deviceid},{endpoint}') ctx.cmd(f'ZbEnroll {device_info.deviceid},{endpoint}') end end"
+                }
+            }
+        }
+    }
+}

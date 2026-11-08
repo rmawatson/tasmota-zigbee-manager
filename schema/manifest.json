@@ -82,8 +82,13 @@
             ],
             "includes": [
                 "link_quality",
-                "battery_percentage"
+                "battery_percentage",
+                "ias_zone"
             ]
+        },
+        "ias_zone": {
+            "mappings": [],
+            "includes": []
         }
     },
     "next": null

@@ -14,6 +14,7 @@ var zbm_state = nil
 var zbm_mqtt_bridge = nil
 var zbm_schema_registry = nil
 var zbm_service = nil
+var zbm_tasks = nil
 var zbm_web_ui = nil
 
 def _join(li, sep, fn)
@@ -358,16 +359,54 @@ end
 class zb_handler_error end
 class zb_handler_invalid end
 
+# the bridge's address as Tasmota shows a device's address attribute, such as IASCIEAddress,
+# with its bytes in the order they are sent, "09A22337004B1200" for 0x00124B003723A209. nil
+# when it is not known, before zigbee has started
+def zb_bridge_address()
+    var longaddr
+    try
+        longaddr = zigbee.info().find("longaddr")
+    except ..
+        return nil
+    end
+    if type(longaddr) != "string" || size(longaddr) != 18
+        return nil
+    end
+    var address = ""
+    var position = 16
+    while position >= 2
+        address += longaddr[position .. position + 1]
+        position -= 2
+    end
+    address = string.toupper(address)
+    return address == "0000000000000000" ? nil : address
+end
+
+# the ctx the schema functions are given, see zb_invoke_handler. bridge_address is only worked
+# out when a function reads it
+class ZbmContext : ZbmStruct
+    def member(name)
+        if name == "bridge_address"
+            return zb_bridge_address()
+        end
+        return super(self).member(name)
+    end
+end
+
 def zb_invoke_handler(callback_name,components,device_info,*args)
     if components.contains(callback_name) && components[callback_name].valid
         def _make_call_fn(fn)
             return def (_,*args) call(fn,args) end
         end
 
-        var context = ZbmStruct({
+        var context = ZbmContext({
             "zb_write":_make_call_fn(zb_write),
             "zb_read":_make_call_fn(zb_read),
-            "zb_send":_make_call_fn(zb_send_device)})
+            "zb_send":_make_call_fn(zb_send_device),
+            # a tasmota command, such as ZbCIE, answered with its result
+            "cmd":def (_,command) return tasmota.cmd(command) end,
+            # an info line in the log, after the device's name
+            "log":def (_,text) ZbmLogger(device_info.name).info(text) end})
         try
             return call(components[callback_name].fn,device_info,args + [context])
         except .. as e,m
@@ -379,25 +418,17 @@ def zb_invoke_handler(callback_name,components,device_info,*args)
     return zb_handler_invalid
 end
 
-def zb_retain(retain_type)
-    var value = tasmota.cmd(retain_type)[retain_type]
-    if type(value) != "string"
-        return !!value
-    end
-    # the reply is tasmota's state text, OFF or ON unless StateText1/2 were changed
-    var text = string.toupper(value)
-    if text == "OFF" || text == "ON"
-        return text == "ON"
-    end
-    return value != tasmota.cmd("StateText1")["StateText1"]
-end
-
+# tasmota's StateRetain and SensorRetain, read from its settings each time, so a change applies
+# to the next message. Running the commands instead would publish their answer to
+# stat/<topic>/RESULT with every message. get_option numbers the bits of tasmota's settings
+# flags as SetOption does: SensorRetain is bit 9 of the first flags, option 9, and StateRetain
+# bit 7 of the fifth, which start at option 114, so option 121
 def zb_state_retain()
-    return zb_retain("StateRetain")
+    return tasmota.get_option(121) == 1
 end
 
 def zb_sensor_retain()
-    return zb_retain("SensorRetain")
+    return tasmota.get_option(9) == 1
 end
 
 
@@ -635,6 +666,43 @@ class ZbmSchemaProcessorInfo
         return true
     end
 
+    # the limits of a task's delay, period, timeout and retries, see ZbmTasks. The longest
+    # period, a week, is well inside the time tasmota's timers can wait
+    static var max_task_delay = 3600
+    static var min_task_period = 60
+    static var max_task_period = 604800
+    static var default_task_timeout = 60
+    static var max_task_timeout = 3600
+    static var max_task_retries = 10
+
+    # a whole number from low to high, unit says what it counts, such as "of seconds "
+    static def valid_range(name,low,high,unit)
+        return def (value)
+            if type(value) != "int" || value < low || value > high
+                raise "validation_error", f"invalid {name} '{value}', expected a whole number {unit}from {low} to {high}"
+            end
+            return true
+        end
+    end
+
+    # a task's expect names one of the handlers, and only a task with an expect has a timeout
+    # or retries. Checked once the includes are merged, as the handler can be in one of them
+    static def check_tasks(tasks,handlers)
+        for task_name : tasks.keys()
+            var task = tasks[task_name]
+            var expect = task.find("expect")
+            if expect == nil
+                for key : ["timeout","retries"]
+                    if task.contains(key)
+                        raise "schema_error", f"task '{task_name}' has {key} but no expect"
+                    end
+                end
+            elif !handlers.contains(expect)
+                raise "schema_error", f"task '{task_name}' expects the handler '{expect}', which is not in the schema or its includes"
+            end
+        end
+    end
+
     # the number n of each relay's cmnd/<device>/Power<n> and stat/<device>/POWER<n> topics.
     # a relay with an "index" has that number, the others take the free numbers in order
     # of their names, a berry map does not keep the order the relays are written in
@@ -710,6 +778,24 @@ class ZbmSchemaProcessorInfo
                 ZbmSchemaItem("others", _class.value_in(["format_category"]), _class.OPTIONAL): ZbmSchemaItem("function_item",_class.valid_name( "name")),
                 ZbmSchemaItem("index", "index", _class.OPTIONAL): ZbmSchemaItem("relay_index",_class.valid_index),
                 ZbmSchemaItem("pulse", "pulse", _class.OPTIONAL): ZbmSchemaItem("pulse",_class.valid_pulse),
+            }
+        },
+        # what is sent to the device when it is configured, and every period after, see ZbmTasks
+        ZbmSchemaItem("tasks", "tasks", _class.OPTIONAL): {
+            ZbmSchemaItem("task_name", _class.valid_name("task_name"), _class.OPTIONAL): {
+                ZbmSchemaItem("run", "run", _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
+                ZbmSchemaItem("delay", "delay", _class.OPTIONAL): ZbmSchemaItem("delay",_class.valid_range("delay",0,_class.max_task_delay,"of seconds ")),
+                ZbmSchemaItem("period", "period", _class.OPTIONAL): ZbmSchemaItem("period",_class.valid_range("period",_class.min_task_period,_class.max_task_period,"of seconds ")),
+                ZbmSchemaItem("expect", "expect", _class.OPTIONAL): ZbmSchemaItem("expect",_class.valid_name("expect")),
+                ZbmSchemaItem("timeout", "timeout", _class.OPTIONAL): ZbmSchemaItem("timeout",_class.valid_range("timeout",1,_class.max_task_timeout,"of seconds ")),
+                ZbmSchemaItem("retries", "retries", _class.OPTIONAL): ZbmSchemaItem("retries",_class.valid_range("retries",0,_class.max_task_retries,"")),
+            }
+        },
+        # what is done with the messages from the device that a handler's has_value takes, see ZbmTasks
+        ZbmSchemaItem("handlers", "handlers", _class.OPTIONAL): {
+            ZbmSchemaItem("handler_name", _class.valid_name("handler_name"), _class.OPTIONAL): {
+                ZbmSchemaItem("has_value", "has_value", _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
+                ZbmSchemaItem("on_value", "on_value", _class.REQUIRED): ZbmSchemaItem("function_item",_class.valid_fn,_class.COMPILABLE,_class.compile_fn),
             }
         },
         ZbmSchemaItem("config", "config", _class.OPTIONAL): {ZbmSchemaItem("config_item", _class.valid_name("config_key"), _class.OPTIONAL):nil},
@@ -992,6 +1078,7 @@ class ZbmSchemaRegistry : ZbmNotify
                 true,
                 true)
 
+            ZbmSchemaProcessorInfo.check_tasks(compiled_schema.find("tasks",{}),compiled_schema.find("handlers",{}))
             self.compiled_cache[schema_name] = ZbmCompiledSchema(
                 schema_name,
                 compiled_schema,
@@ -1605,6 +1692,185 @@ class ZbmMqttBridge
     end
 end
 
+# runs the tasks of the added devices' schemas, and gives the messages from the devices to the
+# handlers of their schemas. A task runs delay seconds after its device is configured, which is
+# when it is added, when the extension starts or mqtt reconnects, and when its schema is pulled
+# or uploaded again, and then every period seconds when it has one. A handler is given every
+# message from the device that its has_value takes, after the device's entities, whether a
+# task asked for it or the device sent it on its own. Tasmota does not pass on which ZbSend a
+# message answers, so a task with an expect is answered when that handler takes a message from
+# the device. If none does within timeout seconds, the task runs again, up to retries times
+class ZbmTasks
+
+    var scheduled   # shortaddr -> [device_info, compiled schema] of a device whose tasks have timers
+    var waiting     # wait timer id -> [handler name, retries left] of a task waiting for its answer
+    var log
+
+    def init()
+        self.log = ZbmLogger("tasks")
+        self.scheduled = {}
+        self.waiting = {}
+    end
+
+    def unload()
+        for entry : to_list(self.scheduled.iter())
+            self.remove(entry[0])
+        end
+    end
+
+    static def run_id(device_info,task_name)
+        return f"zbm_task_{device_info.shortaddr}_{task_name}"
+    end
+
+    static def wait_id(device_info,task_name)
+        return f"zbm_wait_{device_info.shortaddr}_{task_name}"
+    end
+
+    # whether the device's tasks run, while it is added, with no error, and on the bridge
+    static def active(device_info)
+        return (device_info.status & ZbmDeviceStatus.Added) != 0 &&
+               (device_info.status & (ZbmDeviceStatus.ErrorFlag | ZbmDeviceStatus.NotFound)) == 0
+    end
+
+    # starts the timers of the device's tasks, after stopping those it had
+    def configure(device_info,compiled_schema)
+        self.remove(device_info)
+        var tasks = compiled_schema.schema.find("tasks",{})
+        if !size(tasks)
+            return
+        end
+        self.scheduled[device_info.shortaddr] = [device_info,compiled_schema]
+        for task_name : tasks.keys()
+            self.schedule(device_info,task_name,tasks[task_name].find("delay",0))
+        end
+    end
+
+    # stops the device's tasks, when it is removed or reset, configured again, or the
+    # extension unloads
+    def remove(device_info)
+        var entry = self.scheduled.find(device_info.shortaddr)
+        if entry == nil
+            return
+        end
+        self.scheduled.remove(device_info.shortaddr)
+        for task_name : entry[1].schema["tasks"].keys()
+            var wait_id = self.wait_id(device_info,task_name)
+            tasmota.remove_timer(self.run_id(device_info,task_name))
+            tasmota.remove_timer(wait_id)
+            self.waiting.remove(wait_id)
+        end
+    end
+
+    # the device's task, nil when it has no such task or its tasks are not running
+    def task(device_info,task_name)
+        var entry = self.scheduled.find(device_info.shortaddr)
+        return entry == nil ? nil : entry[1].schema["tasks"].find(task_name)
+    end
+
+    def schedule(device_info,task_name,seconds)
+        var run_id = self.run_id(device_info,task_name)
+        tasmota.remove_timer(run_id)
+        tasmota.set_timer(seconds * 1000,/-> self.run_scheduled(device_info,task_name),run_id)
+    end
+
+    # a task that is due runs, unless the device is not active, and is due again after its period
+    def run_scheduled(device_info,task_name)
+        var task = self.task(device_info,task_name)
+        if task == nil
+            return
+        end
+        if task.contains("period")
+            self.schedule(device_info,task_name,task["period"])
+        end
+        if self.active(device_info)
+            self.run(device_info,task_name)
+        end
+    end
+
+    # runs the task now. With an expect, it then waits for that handler to take a message, and
+    # runs again when none comes in time, at most retries more times, by default the task's
+    # retries. Returns false when the device has no such task, or its run is turned off after
+    # an error
+    def run(device_info,task_name,retries)
+        var task = self.task(device_info,task_name)
+        if task == nil
+            return false
+        end
+        if retries == nil
+            retries = task.find("retries",0)
+        end
+        self.log.debug(f"running task {task_name} of {device_info.name}")
+        var result = zb_invoke_handler("run",task,device_info)
+        if result == zb_handler_error
+            self.log.error(f"task {task_name} of {device_info.name} failed and is turned off, see the log with log_level 3")
+            return false
+        elif result == zb_handler_invalid
+            self.log.debug(f"task {task_name} of {device_info.name} is turned off after an error")
+            return false
+        end
+        var expect = task.find("expect")
+        if expect != nil
+            var wait_id = self.wait_id(device_info,task_name)
+            tasmota.remove_timer(wait_id)
+            self.waiting[wait_id] = [expect,retries]
+            tasmota.set_timer(task.find("timeout",ZbmSchemaProcessorInfo.default_task_timeout) * 1000,
+                              /-> self.timed_out(device_info,task_name),wait_id)
+        end
+        return true
+    end
+
+    def timed_out(device_info,task_name)
+        var wait_id = self.wait_id(device_info,task_name)
+        var wait = self.waiting.find(wait_id)
+        if wait == nil
+            return
+        end
+        self.waiting.remove(wait_id)
+        if wait[1] > 0 && self.active(device_info)
+            self.log.info(f"no answer from {device_info.name} to task {task_name}, running it again")
+            self.run(device_info,task_name,wait[1] - 1)
+        else
+            self.log.error(f"no answer from {device_info.name} to task {task_name}")
+        end
+    end
+
+    # gives a message from the device to the handlers of its schema whose has_value takes it
+    def handle(device_info,compiled_schema,attr_list)
+        var handlers = compiled_schema.schema.find("handlers",{})
+        for handler_name : handlers.keys()
+            var handler = handlers[handler_name]
+            var taken = zb_invoke_handler("has_value",handler,device_info,attr_list)
+            if taken == zb_handler_error
+                self.log.error(f"has_value of handler {handler_name} of {device_info.name} failed and is turned off, see the log with log_level 3")
+                continue
+            elif taken == zb_handler_invalid || !taken
+                continue
+            end
+            self.answered(device_info,handler_name)
+            if zb_invoke_handler("on_value",handler,device_info,attr_list) == zb_handler_error
+                self.log.error(f"on_value of handler {handler_name} of {device_info.name} failed and is turned off, see the log with log_level 3")
+            end
+        end
+    end
+
+    # the device's tasks waiting for the handler have their answer
+    def answered(device_info,handler_name)
+        var entry = self.scheduled.find(device_info.shortaddr)
+        if entry == nil
+            return
+        end
+        for task_name : entry[1].schema["tasks"].keys()
+            var wait_id = self.wait_id(device_info,task_name)
+            var wait = self.waiting.find(wait_id)
+            if wait != nil && wait[0] == handler_name
+                tasmota.remove_timer(wait_id)
+                self.waiting.remove(wait_id)
+                self.log.debug(f"task {task_name} of {device_info.name} has its answer")
+            end
+        end
+    end
+end
+
 
 class ZbmState : ZbmNotify
 
@@ -1812,6 +2078,7 @@ class ZbmService
     def reset()
         for device_info : self.device_infos.iter()
             zbm_mqtt_bridge.unsubscribe_device(device_info)
+            zbm_tasks.remove(device_info)
         end
         self.device_infos = {}
         self.save_devices()
@@ -2054,6 +2321,7 @@ class ZbmService
             return nil    
         end
         zbm_mqtt_bridge.unsubscribe_device(device_info)
+        zbm_tasks.remove(device_info)
 
         
         if device_info.status & ZbmDeviceStatus.Added
@@ -2077,6 +2345,7 @@ class ZbmService
             return nil    
         end
         zbm_mqtt_bridge.unsubscribe_device(device_info)
+        zbm_tasks.remove(device_info)
         device_info.status = 0
         self.log.info(f"reset device name:{device_info.name} shortaddr:{device_info.deviceid}")
         self.save_devices()        
@@ -2148,10 +2417,12 @@ class ZbmService
         var compiled_schema
 
         if (schema_name := self.device_mapping(device_info)) == nil
+            zbm_tasks.remove(device_info)
             return nil
         end
 
         if (compiled_schema := self.device_schema(device_info,schema_name)) == nil
+            zbm_tasks.remove(device_info)
             return nil            
         end
 
@@ -2161,6 +2432,7 @@ class ZbmService
         if zbm_state.mqtt_connected
             zbm_mqtt_bridge.configure_device(device_info,compiled_schema)
             zbm_mqtt_bridge.request_device_values(device_info,compiled_schema)
+            zbm_tasks.configure(device_info,compiled_schema)
             tasmota.set_timer(4,/ -> zbm_mqtt_bridge.dispatch_online_state(device_info,zbm_state.zigbee_started))
         else
             self.log.info(f"device not configured mqtt offline name:{device_info.name} shortaddr:{device_info.shortaddr}")
@@ -2246,6 +2518,9 @@ class ZbmService
             # an entity with a pulse is set back after this, see ZbmMqttBridge.update_pulse
             zbm_mqtt_bridge.dispatch_value(device_info,category_name,dispatch_data)
         end
+
+        # then the schema's handlers, see ZbmTasks
+        zbm_tasks.handle(device_info,compiled_schema,attr_list)
     end
 
 end
@@ -2699,6 +2974,31 @@ def zbm_power(cmnd_name, idx, payload, payload_json)
     tasmota.resp_cmnd(json.dump({f"{cmnd_name}{idx}":{"devicename":device_info.name,
                                                     "deviceid":device_info.deviceid,
                                                     "state":state == nil ? nil : (state ? "ON" : "OFF")}}))
+end
+
+# ZbmRunTask <device>,<task> runs a task of an added device's schema now, as when it is due,
+# with its expect, timeout and retries, to try a schema's task without waiting for it
+def zbm_run_task(cmnd_name, idx, payload, payload_json)
+
+    var parsed_args
+    if (parsed_args := parse_args(cmnd_name,payload,payload_json,["device","task"])) == nil
+        return
+    end
+
+    var device_info = device_by_id_or_name(parsed_args[0].value)
+    if device_info == nil
+        return log_cmnd_error(cmnd_name,f"device {parsed_args[0].value} not found")
+    end
+    var task_name = parsed_args[1].value
+    if !ZbmTasks.active(device_info) || zbm_tasks.task(device_info,task_name) == nil
+        return log_cmnd_error(cmnd_name,f"{device_info.name} has no task {task_name}, or is not added")
+    end
+    if !zbm_tasks.run(device_info,task_name)
+        return log_cmnd_error(cmnd_name,f"task {task_name} of {device_info.name} is turned off after an error, see the log with log_level 3")
+    end
+    tasmota.resp_cmnd(json.dump({cmnd_name:{"devicename":device_info.name,
+                                            "deviceid":device_info.deviceid,
+                                            "task":task_name}}))
 end
 
 def zbm_config(cmmd_name,idx,payload,payload_json)
@@ -3542,7 +3842,7 @@ class ZbmWebUI
                 end
             end
             var rows = [["Includes",_join(schema.find("include",[]),", ")]]
-            for category : ZbmSchemaProcessorInfo.categories
+            for category : ZbmSchemaProcessorInfo.categories + ["tasks","handlers"]
                 if schema.contains(category)
                     rows.push([string.toupper(category[0]) + category[1..],_join(to_list(schema[category].keys()),", ")])
                 end
@@ -3762,6 +4062,32 @@ class ZbmWebUI
         return ["Unable to start pulling schemas, see the console",false]
     end
 
+    # the handlers of schema_name and of the schemas it includes, those being uploaded first,
+    # then those in the registry, as a map from their names, for the tasks' expect
+    def handler_names(schema_name,schemas,known)
+        var names = {}
+        var seen = {}
+        var search = [schema_name]
+        while size(search)
+            var name = search.pop(0)
+            if seen.contains(name)
+                continue
+            end
+            seen[name] = true
+            var schema = schemas.contains(name) ? schemas[name] : known.find(name)
+            if !isinstance(schema,map)
+                continue
+            end
+            for handler_name : schema.find("handlers",{}).keys()
+                names[handler_name] = true
+            end
+            for include_name : schema.find("include",[])
+                search.push(include_name)
+            end
+        end
+        return names
+    end
+
     # returns why schema_json can not be added to the registry, or nil
     def check_schema(schema_json)
         try
@@ -3786,6 +4112,7 @@ class ZbmWebUI
             end
             try
                 ZbmSchemaProcessorInfo.relay_numbers(schemas[schema_name].find("relays",{}))
+                ZbmSchemaProcessorInfo.check_tasks(schemas[schema_name].find("tasks",{}),self.handler_names(schema_name,schemas,known))
             except .. as e,m
                 return f"in {schema_name}, {m}"
             end
@@ -3918,11 +4245,13 @@ class ZbmExtension
         zbm_state = ZbmState()
         zbm_mqtt_bridge = ZbmMqttBridge()
         zbm_schema_registry = ZbmSchemaRegistry()
+        zbm_tasks = ZbmTasks()
         zbm_service = ZbmService()
 
         tasmota.add_cmd('ZbmDevice',zbm_device)
         tasmota.add_cmd('ZbmDevices',zbm_devices)
         tasmota.add_cmd('ZbmPower',zbm_power)
+        tasmota.add_cmd('ZbmRunTask',zbm_run_task)
         tasmota.add_cmd('ZbmSchemas',zbm_schemas)
         tasmota.add_cmd('ZbmConfig',zbm_config)
         tasmota.add_cmd('ZbmPollDevices',zbm_poll_devices)
@@ -3959,17 +4288,20 @@ class ZbmExtension
             zbm_web_ui = nil
         end
         zbm_service.unload()
+        zbm_tasks.unload()
         zbm_schema_registry.unload()
         zbm_mqtt_bridge.unload()
         zbm_state.unload()
         
         zbm_service = nil
+        zbm_tasks = nil
         zbm_schema_registry = nil
         zbm_mqtt_bridge = nil
         zbm_state = nil
         tasmota.remove_cmd('ZbmDevice')
         tasmota.remove_cmd('ZbmDevices')
         tasmota.remove_cmd('ZbmPower')
+        tasmota.remove_cmd('ZbmRunTask')
         tasmota.remove_cmd('ZbmSchemas')
         tasmota.remove_cmd('ZbmConfig')
         tasmota.remove_cmd('ZbmPollDevices')
