@@ -284,7 +284,7 @@ class ZbmStore
     end
 
     # saves the value fn gives a second after the first save asked for, a burst of changes is
-    # written once
+    # written once. fn gives nil when, by then, there is nothing to save
     def save_later(fn)
         if self.pending == nil
             tasmota.set_timer(self.save_delay, /-> self.flush(), self.file)
@@ -300,7 +300,8 @@ class ZbmStore
         end
         self.pending = nil
         tasmota.remove_timer(self.file)
-        return self.save(fn())
+        var value = fn()
+        return value == nil ? true : self.save(value)
     end
 
     static def flush_all()
@@ -429,6 +430,17 @@ end
 
 def zb_sensor_retain()
     return tasmota.get_option(9) == 1
+end
+
+# the address tasmota's web server is reached at, for the discovery config: ethernet's when it
+# has one, otherwise wifi's, as for tasmota.hostname(). Read here rather than with the State
+# command, which would publish its answer to stat/<topic>/RESULT for every device configured
+def zb_network_address()
+    var address = tasmota.eth().find("ip")
+    if address == nil
+        address = tasmota.wifi().find("ip")
+    end
+    return address == nil ? "0.0.0.0" : address
 end
 
 
@@ -1509,9 +1521,6 @@ class ZbmMqttBridge
 
     def configure_device(device_info,compiled_schema)
 
-        var state_map = tasmota.cmd("State")
-        var status_map = tasmota.cmd("Status")["Status"]
-
         var relays = []
         var switches = []
         var switch_names = []
@@ -1590,10 +1599,10 @@ class ZbmMqttBridge
         mqtt.publish(
             f"tasmota/discovery/{device_info.macaddr}/config",
             json.dump({
-                "ip": state_map["IPAddress"],
+                "ip": zb_network_address(),
                 "dn": device_info.name,
                 "fn": friendly_names,
-                "hn": state_map["Hostname"],
+                "hn": tasmota.hostname(),
                 "mac": device_info.macaddr,
                 "md": device_info.model,
                 "ty": 0,
@@ -1986,9 +1995,15 @@ class ZbmService
     var log
     var store
     var saved_text      # the lasting details of the devices as last saved, see save_devices
+    var waiting         # the short addresses of the devices waiting to be configured again
+    var configuring     # a device was configured from the queue, the next waits, see configure_later
+    var save_held       # save_devices was asked for while devices waited, see save_devices
 
     # these change with every message, and the poll reads them from the bridge again
     static var passing_keys = ["lastseen", "lqi", "battery", "battery_lastseen", "reachable"]
+    # ms from one device configured again to the next, see configure_later
+    static var configure_delay = 1000
+    static var configure_timer = "zbm_configure"
 
 
     def init()
@@ -1997,6 +2012,9 @@ class ZbmService
         self.store = ZbmStore("devices")
         self.load_devices()
         self.poll_count = 0
+        self.waiting = []
+        self.configuring = false
+        self.save_held = false
         zigbee.add_handler(self)
         zbm_state.on_changed("auto_poll_devices",/value -> self.on_auto_poll_devices_changed(value))
         zbm_state.on_changed("zigbee_started",/value -> self.on_zigbee_status_changed(value))
@@ -2011,6 +2029,7 @@ class ZbmService
     def unload()
         zigbee.remove_handler(self)
         tasmota.remove_driver(self)
+        tasmota.remove_timer(self.configure_timer)
         self.log.info("uninitialized")
     end
 
@@ -2044,14 +2063,27 @@ class ZbmService
     end
 
     # saved when a device is added, removed, renamed or its status changes. Every device is
-    # configured again when zigbee starts or mqtt connects, which changes none of them
+    # configured again when zigbee starts or mqtt connects, which changes none of them. Whether
+    # one changed is checked when the save is due, a second after the ask, as the check turns
+    # every device into json. While devices wait to be configured again it waits for the last
+    # of them, so the devices of a burst are checked once rather than once each
     def save_devices()
-        var text = self.lasting_text()
-        if text == self.saved_text
+        if size(self.waiting)
+            self.save_held = true
             return
         end
+        self.save_held = false
+        self.store.save_later(/-> self.changed_devices())
+    end
+
+    # the devices to write, nil when none of their lasting details changed since the last save
+    def changed_devices()
+        var text = self.lasting_text()
+        if text == self.saved_text
+            return nil
+        end
         self.saved_text = text
-        self.store.save_later(/-> self.saved_devices())
+        return self.saved_devices()
     end
 
     # the devices as they are, also when only their link quality, battery or last seen changed,
@@ -2081,6 +2113,7 @@ class ZbmService
             zbm_tasks.remove(device_info)
         end
         self.device_infos = {}
+        self.waiting.clear()
         self.save_devices()
     end
     
@@ -2098,7 +2131,9 @@ class ZbmService
     end
 
     def on_zigbee_status_changed(available)
-        self.on_mqtt_status_changed(available)
+        if available
+            self.configure_all()
+        end
         # for device_info : self.device_infos.iter()
         #     if device_info.status != ZbmDeviceStatus.Added
         #         self.log.debug(f"Skipping {device_info.name}, not added")
@@ -2112,17 +2147,73 @@ class ZbmService
 
     def on_mqtt_status_changed(available)
         if available
-            for device_info : self.device_infos.iter()
-                if device_info.status != ZbmDeviceStatus.Added
-                    self.log.debug(f"Skipping {device_info.name}, not added")
-                    continue
-                end
-                if !self.configure_device(device_info)
-                    self.log.debug(f"unable to confoigure device {device_info.name}")
-                end
+            self.configure_all()
+        else
+            # the devices still waiting are configured again with the others once it reconnects
+            self.waiting.clear()
+            if self.save_held
+                self.save_devices()
             end
         end
         self.log.debug(f"mqtt status changed to {available}")
+    end
+
+    # every added device is configured again when mqtt connects or zigbee starts, and when the
+    # extension loads with mqtt connected
+    def configure_all()
+        var added = []
+        for device_info : self.device_infos.iter()
+            if device_info.status != ZbmDeviceStatus.Added
+                self.log.debug(f"Skipping {device_info.name}, not added")
+                continue
+            end
+            added.push(device_info)
+        end
+        self.configure_later(added)
+    end
+
+    # configures the devices again one at a time, a second apart, rather than all in one go. Each
+    # holds tasmota's main loop for a while, and tasmota reads nothing from the zigbee chip until
+    # it is done, so with them all in one go the data the chip sends meanwhile can be lost. The
+    # first is configured now unless one was in the last second. A device already waiting keeps
+    # its place, and one removed or reset while it waits is left out
+    def configure_later(device_infos)
+        var queued = 0
+        for device_info : device_infos
+            if self.waiting.find(device_info.shortaddr) == nil
+                self.waiting.push(device_info.shortaddr)
+                queued += 1
+            end
+        end
+        if queued
+            self.log.debug(f"{queued} device(s) to configure again, one a second")
+        end
+        if !self.configuring
+            self.configure_next()
+        end
+    end
+
+    def configure_next()
+        self.configuring = false
+        while size(self.waiting)
+            var device_info = self.device_infos.find(self.waiting[0])
+            self.waiting.remove(0)
+            if device_info != nil && (device_info.status & ZbmDeviceStatus.Added)
+                # the next waits a second, also when it is queued after this, and still comes
+                # if this one fails
+                self.configuring = true
+                tasmota.set_timer(self.configure_delay,/-> self.configure_next(),self.configure_timer)
+                if !self.configure_device(device_info)
+                    self.log.debug(f"unable to configure device {device_info.name}")
+                end
+                return
+            end
+        end
+        # none left. When the last were left out, the save held back while they waited is
+        # asked for now
+        if self.save_held
+            self.save_devices()
+        end
     end
 
     def on_registry_changed(registry)
@@ -3123,8 +3214,9 @@ class ZbmSchemaPuller
     # and zigbee while the files download. the schemas are always downloaded, even when
     # already in the registry, as the repository may have newer versions. each file
     # replaces the schemas it defines as soon as it has been downloaded, then the added
-    # devices using them are configured again so the changes take effect. the files come
-    # from the schema_url setting, this repository's main branch unless it was changed
+    # devices using them are configured again, one a second, so the changes take effect.
+    # the files come from the schema_url setting, this repository's main branch unless it
+    # was changed
 
     static var timer_id = "zbm_pull_schemas"
     static var step_delay = 100
@@ -3146,7 +3238,6 @@ class ZbmSchemaPuller
     var requested
     var found
     var downloaded
-    var reconfigure
     var step
     var attempts
     var running
@@ -3167,7 +3258,6 @@ class ZbmSchemaPuller
         self.requested = {}
         self.found = []
         self.downloaded = []
-        self.reconfigure = []
         self.attempts = 0
         self.running = false
     end
@@ -3299,12 +3389,17 @@ class ZbmSchemaPuller
     # registry, queueing the schemas it includes
     def download_schema()
         if !size(self.pending)
+            # the added devices using the replaced schemas are configured again, so new or
+            # removed entities show up over mqtt without restarting. One a second, see
+            # ZbmService.configure_later, so most are configured after the result is published
+            var reconfigure = []
             for device_info : zbm_service.device_infos.iter()
                 if (device_info.status & ZbmDeviceStatus.Added) && self.found.find(device_info.key) != nil
-                    self.reconfigure.push(device_info)
+                    reconfigure.push(device_info)
                 end
             end
-            self.next(/-> self.reconfigure_device())
+            zbm_service.configure_later(reconfigure)
+            self.finish()
             return
         end
 
@@ -3321,22 +3416,6 @@ class ZbmSchemaPuller
             end
         end
         self.next(/-> self.download_schema())
-    end
-
-    # configures one added device per step with its replaced schema, so new or
-    # removed entities show up over mqtt without restarting
-    def reconfigure_device()
-        if !size(self.reconfigure)
-            self.finish()
-            return
-        end
-        var device_info = self.reconfigure[0]
-        self.reconfigure.remove(0)
-        if zbm_service.has_device(device_info.shortaddr) && (device_info.status & ZbmDeviceStatus.Added)
-            self.log.info(f"configuring {device_info.name} with the updated schema")
-            zbm_service.configure_device(device_info)
-        end
-        self.next(/-> self.reconfigure_device())
     end
 
     def finish(error)
@@ -4141,14 +4220,17 @@ class ZbmWebUI
 
         zbm_schema_registry.replace_schemas(schema_json)
 
-        # added devices using the schemas are configured again so the changes take effect
+        # added devices using the schemas are configured again so the changes take effect, one a
+        # second, see ZbmService.configure_later
         var schema_names = to_list(schema_json.find("schemas",{}).keys())
+        var reconfigure = []
         for device_info : zbm_service.device_infos.iter()
             if (device_info.status & ZbmDeviceStatus.Added) && device_info.key != nil &&
                     schema_names.find(zbm_schema_registry.mapping(device_info.key)) != nil
-                zbm_service.configure_device(device_info)
+                reconfigure.push(device_info)
             end
         end
+        zbm_service.configure_later(reconfigure)
 
         var mapping_count = size(schema_json.find("mappings",{}))
         var added = size(schema_names) ? _join(schema_names,", ") : ""
